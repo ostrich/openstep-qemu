@@ -1,0 +1,24 @@
+Subject: [PATCH 15/16] virtio-console: avoid rethrottling a disconnected port
+
+A backend write can synchronously disconnect its host port. Do not reinstall
+a write watch or re-throttle the port after its disconnect handler ran.
+
+---
+diff --git a/hw/char/virtio-console.c b/hw/char/virtio-console.c
+index 4737b9a..79fe02e 100644
+--- a/hw/char/virtio-console.c
++++ b/hw/char/virtio-console.c
+@@ -63,6 +63,13 @@ static ssize_t flush_buf(VirtIOSerialPort *port,
+     ret = qemu_chr_fe_write(&vcon->chr, buf, len);
+     trace_virtio_console_flush_buf(port->id, len, ret);
+ 
++    /* A write can synchronously close the backend. chr_event() has already
++     * cleared throttling and discarded the pending element in that case.
++     * Do not reinstall a write watch or re-throttle the disconnected port. */
++    if (!port->host_connected) {
++        return ret;
++    }
++
+     if (ret < len) {
+         VirtIOSerialPortClass *k = VIRTIO_SERIAL_PORT_GET_CLASS(port);
+ 

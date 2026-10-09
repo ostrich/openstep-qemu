@@ -1,0 +1,3 @@
+0001-esp-scsi-wait-for-status-phase.patch
+0002-esp-scsi-acknowledge-final-interrupt.patch
+0003-lsi-scsi-initialize-qemu-53c810.patch

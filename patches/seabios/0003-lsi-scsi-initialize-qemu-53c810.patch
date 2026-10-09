@@ -1,0 +1,21 @@
+Subject: [PATCH 3/4] lsi-scsi: initialize QEMU NCR 53C810 controllers
+
+QEMU exposes a 53C810 PCI identity using the shared LSI controller model.
+Allow the existing BIOS driver to initialize it, enabling INT13 disk access
+for guests whose original driver binds to that identity.
+
+---
+diff --git a/src/hw/lsi-scsi.c b/src/hw/lsi-scsi.c
+index cbaa2ac..fcd05b9 100644
+--- a/src/hw/lsi-scsi.c
++++ b/src/hw/lsi-scsi.c
+@@ -216,7 +216,8 @@ lsi_scsi_setup(void)
+     struct pci_device *pci;
+     foreachpci(pci) {
+         if (pci->vendor != PCI_VENDOR_ID_LSI_LOGIC
+-            || pci->device != PCI_DEVICE_ID_LSI_53C895A)
++            || (pci->device != PCI_DEVICE_ID_LSI_53C895A
++                && pci->device != PCI_DEVICE_ID_NCR_53C810))
+             continue;
+         run_thread(init_lsi_scsi, pci);
+     }

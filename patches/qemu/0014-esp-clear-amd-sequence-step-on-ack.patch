@@ -1,0 +1,121 @@
+Subject: [PATCH 14/16] esp: clear Am53C974 sequence step on interrupt acknowledgement
+
+Clear the Am53C974 sequence-step register when a pending interrupt is
+acknowledged, as specified in AMD section 5.2.3.9. Reads without a pending
+interrupt preserve it. Command progress stays in the existing private
+FIFO/continuation state; other ESP variants retain their prior behavior.
+
+---
+--- a/hw/scsi/esp.c
++++ b/hw/scsi/esp.c
+@@ -1337,18 +1337,15 @@
+          * except TC
+          */
+         val = s->rregs[ESP_RINTR];
++        /* AMD ISREG clears only when a pending interrupt is acknowledged. */
++        if (s->chip_id == TCHI_AM53C974 &&
++            (s->rregs[ESP_RSTAT] & STAT_INT)) {
++            s->rregs[ESP_RSEQ] = SEQ_0;
++        }
+         s->rregs[ESP_RINTR] = 0;
+         esp_lower_irq(s);
+         s->rregs[ESP_RSTAT] &= STAT_TC | 7;
+-        /*
+-         * According to the datasheet ESP_RSEQ should be cleared, but as the
+-         * emulation currently defers information transfers to the next TI
+-         * command leave it for now so that pedantic guests such as the old
+-         * Linux 2.6 driver see the correct flags before the next SCSI phase
+-         * transition.
+-         *
+-         * s->rregs[ESP_RSEQ] = SEQ_0;
+-         */
++        /* Other ESP variants retain their existing sequence-step behavior. */
+         break;
+     case ESP_TCHI:
+         /* Return the unique id if the value has never been written */
+--- a/tests/qtest/am53c974-dma-test.c
++++ b/tests/qtest/am53c974-dma-test.c
+@@ -904,6 +904,73 @@
+     qtest_quit(q);
+ }
+ 
++static void sequence_ack(void)
++{
++    QTestState *q = start();
++
++    reg_write(q, 2, 0x80);
++    for (unsigned i = 0; i < 6; i++) {
++        reg_write(q, 2, 0);
++    }
++    reg_write(q, 3, 0x42);
++    g_assert_cmphex(reg_read(q, 6), ==, 4);
++    g_assert_cmphex(qtest_inb(q, IO + 0x15), ==, 0);
++    g_assert_cmphex(reg_read(q, 6), ==, 4);
++    g_assert_cmphex(reg_read(q, 5), ==, 0x18);
++    g_assert_cmphex(reg_read(q, 6), ==, 0);
++    g_assert_cmphex(reg_read(q, 4) & 7, ==, 3);
++    g_assert_cmphex(finish_command(q), ==, 0);
++    qtest_quit(q);
++}
++
++static void sequence_deferred(void)
++{
++    QTestState *q = start();
++    uint8_t command[] = {0x80, 0x28, 0, 0, 0, 0, 0, 0, 0, 1, 0};
++
++    qtest_memwrite(q, FLAT, command, sizeof(command));
++    reg_write(q, 4, 0);
++    reg_write(q, 0, sizeof(command));
++    reg_write(q, 1, 0);
++    reg_write(q, 14, 0);
++    begin_dma(q, false, true, 1, FLAT, 0);
++    reg_write(q, 3, 0xc2);
++    g_assert_cmphex(reg_read(q, 6), ==, 4);
++    g_assert_cmphex(reg_read(q, 5), ==, 0);
++    g_assert_cmphex(reg_read(q, 6), ==, 4); /* No pending interrupt. */
++    begin_dma(q, false, true, sizeof(command) - 1, FLAT + 1, 0);
++    wait_dma(q);
++    g_assert_cmphex(reg_read(q, 5), ==, 0x18);
++    g_assert_cmphex(reg_read(q, 6), ==, 0);
++    reg_write(q, 0, 0);
++    reg_write(q, 1, 2);
++    begin_dma(q, false, false, 512, FLAT + 4096, 0);
++    reg_write(q, 3, 0x90);
++    wait_dma(q);
++    g_assert_cmphex(finish_command(q), ==, 0);
++    check_bytes(q, FLAT + 4096, fixture, 512);
++    qtest_quit(q);
++}
++
++static void sequence_stop(void)
++{
++    QTestState *q = start();
++
++    reg_write(q, 2, 0x80);
++    reg_write(q, 3, 0x43);
++    g_assert_cmphex(reg_read(q, 6), ==, 1);
++    g_assert_cmphex(reg_read(q, 5), ==, 0x18);
++    g_assert_cmphex(reg_read(q, 6), ==, 0);
++    reg_write(q, 3, 0x10); /* Complete MESSAGE OUT without losing identify. */
++    g_assert_cmphex(reg_read(q, 5), ==, 0x10);
++    for (unsigned i = 0; i < 6; i++) {
++        reg_write(q, 2, 0);
++    }
++    reg_write(q, 3, 0x10);
++    g_assert_cmphex(finish_command(q), ==, 0);
++    qtest_quit(q);
++}
++
+ int main(int argc, char **argv)
+ {
+     int fd, i;
+@@ -944,6 +1011,9 @@
+     qtest_add_data_func("/am53c974/write/direction-error", GUINT_TO_POINTER(1),
+                         direction_error);
+     qtest_add_func("/am53c974/fifo-error", fifo_error);
++    qtest_add_func("/am53c974/sequence-ack", sequence_ack);
++    qtest_add_func("/am53c974/sequence-deferred", sequence_deferred);
++    qtest_add_func("/am53c974/sequence-stop", sequence_stop);
+     qtest_add_func("/am53c974/reserved-command-lane", reserved_command_lane);
+     qtest_add_func("/am53c974/descriptor-error", descriptor_error);
+     qtest_add_data_func("/am53c974/read/data-error", GUINT_TO_POINTER(0),

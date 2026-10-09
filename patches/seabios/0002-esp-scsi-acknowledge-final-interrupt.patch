@@ -1,0 +1,17 @@
+Subject: [PATCH 2/4] esp-scsi: acknowledge the final command interrupt
+
+MSGACC leaves the emulated ESP interrupt pending. The next OS can enter
+an interrupt storm before its SCSI driver initializes. Acknowledge the
+completion interrupt before returning from the BIOS disk operation.
+
+--- a/src/hw/esp-scsi.c
++++ b/src/hw/esp-scsi.c
+@@ -168,6 +168,8 @@
+             status = inb(iobase + ESP_FIFO);
+             inb(iobase + ESP_FIFO);
+             outb(ESP_CMD_MSGACC, iobase + ESP_CMD);
++            /* Acknowledge completion before handing the IRQ to the OS. */
++            inb(iobase + ESP_RINTR);
+             break;
+         }
+         usleep(5);

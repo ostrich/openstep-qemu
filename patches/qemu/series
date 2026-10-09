@@ -1,0 +1,16 @@
+0001-pcnet-encode-csr76-and-csr78-as-negative-ring-lengths.patch
+0002-pcnet-keep-transmit-and-receive-disabled-before-strt.patch
+0003-sb16-do-not-generate-a-completion-interrupt-on-dsp-reset.patch
+0004-i8259-withdraw-an-unacknowledged-cascade-request.patch
+0005-vmware-vga-support-4k-with-sufficient-vram.patch
+0006-esp-account-for-short-dma-transfers.patch
+0007-esp-pci-implement-am53c974-mdl-dma.patch
+0008-scsi-validate-restored-request-buffers.patch
+0009-esp-preserve-dma-progress-during-migration.patch
+0010-qtest-cover-am53c974-dma-and-migration.patch
+0011-esp-pci-correct-register-byte-lanes.patch
+0012-esp-report-illegal-command-interrupts.patch
+0013-esp-report-illegal-operation-errors.patch
+0014-esp-clear-amd-sequence-step-on-ack.patch
+0015-virtio-console-avoid-rethrottling-a-disconnected-port.patch
+0016-virtio-serial-complete-pending-output-on-port-close.patch

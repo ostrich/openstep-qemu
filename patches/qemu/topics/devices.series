@@ -1,0 +1,5 @@
+0001-pcnet-encode-csr76-and-csr78-as-negative-ring-lengths.patch
+0002-pcnet-keep-transmit-and-receive-disabled-before-strt.patch
+0003-sb16-do-not-generate-a-completion-interrupt-on-dsp-reset.patch
+0004-i8259-withdraw-an-unacknowledged-cascade-request.patch
+0005-vmware-vga-support-4k-with-sufficient-vram.patch

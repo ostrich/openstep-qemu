@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "distribution_version": "0.1.0-dev",
+  "projects": {
+    "qemu": {
+      "url": "https://github.com/qemu/qemu.git",
+      "version": "11.1.1",
+      "revision": "c3d48b7d1e89604920e5b81b91140c2ad39a1943",
+      "patches": "patches/qemu",
+      "topics": [
+        "devices",
+        "scsi",
+        "virtio-console"
+      ]
+    },
+    "seabios": {
+      "url": "https://github.com/coreboot/seabios.git",
+      "version": "1.17.0",
+      "revision": "b52ca86e094d19b58e2304417787e96b940e39c6",
+      "patches": "patches/seabios",
+      "topics": [
+        "scsi",
+        "virtio"
+      ]
+    }
+  }
+}

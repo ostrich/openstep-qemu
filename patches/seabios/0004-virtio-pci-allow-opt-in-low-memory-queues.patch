@@ -1,0 +1,32 @@
+Subject: [PATCH 4/4] virtio-pci: allow opt-in low-memory queues
+
+Honor etc/virtio-low-queues for persistent BIOS virtqueues. Conventional
+memory avoids high-memory probing by older boot loaders; default allocation
+remains unchanged.
+
+---
+--- a/src/hw/virtio-pci.c
++++ b/src/hw/virtio-pci.c
+@@ -18,6 +18,7 @@
+ #include "config.h" // CONFIG_DEBUG_LEVEL
+ #include "malloc.h" // free
+ #include "output.h" // dprintf
++#include "romfile.h" // romfile_loadbool
+ #include "pci.h" // pci_config_readl
+ #include "pcidevice.h" // struct pci_device
+ #include "pci_regs.h" // PCI_BASE_ADDRESS_0
+@@ -318,7 +319,13 @@
+    u16 num;
+ 
+    ASSERT32FLAT();
+-   struct vring_virtqueue *vq = *p_vq = memalign_high(PAGE_SIZE, sizeof(*vq));
++   /* Older boot loaders may probe/clear high RAM without honoring E820
++    * reservations. Keep persistent BIOS queues below the conventional-memory
++    * boundary when explicitly requested; default allocation is unchanged. */
++   int low = romfile_loadbool("etc/virtio-low-queues", 0);
++   struct vring_virtqueue *vq = *p_vq = low
++       ? memalign_low(PAGE_SIZE, sizeof(*vq))
++       : memalign_high(PAGE_SIZE, sizeof(*vq));
+    if (!vq) {
+        warn_noalloc();
+        goto fail;

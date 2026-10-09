@@ -1,0 +1,218 @@
+Subject: [PATCH 5/16] vmware_vga: support 3840x2160 with sufficient video RAM
+
+The advertised 2368x1770 limit prevents guests from selecting larger modes,
+even when vgamem_mb provides enough framebuffer memory. Raise the limits to
+3840x2160 and validate the complete mode against allocated VRAM before
+creating a display surface. Retain the previous surface while registers
+contain zero dimensions or a mode that does not fit. Complete synchronous
+display updates normally in that case so screendump does not hang.
+
+Keep the existing 16 MiB default and migration layout unchanged. Guests
+using 3840x2160x32 must explicitly configure vgamem_mb=32 (or larger).
+
+Add native qtests for 4K with 32 MiB, rejection with the default 16 MiB,
+zero dimensions, recovery to 2560x1600, and FIFO fill/copy at the last pixel.
+OPENSTEP 4.2 also boots to Workspace at 4K with an updated guest driver.
+
+---
+diff --git a/hw/display/vmware_vga.c b/hw/display/vmware_vga.c
+index 567806f..9c8ae58 100644
+--- a/hw/display/vmware_vga.c
++++ b/hw/display/vmware_vga.c
+@@ -220,8 +220,8 @@ enum {
+ 
+ /* These values can probably be changed arbitrarily.  */
+ #define SVGA_SCRATCH_SIZE               0x8000
+-#define SVGA_MAX_WIDTH                  2368
+-#define SVGA_MAX_HEIGHT                 1770
++#define SVGA_MAX_WIDTH                  3840
++#define SVGA_MAX_HEIGHT                 2160
+ 
+ #ifdef VERBOSE
+ # define GUEST_OS_BASE          0x5001
+@@ -1120,10 +1120,20 @@ static void vmsvga_bios_write(void *opaque, uint32_t address, uint32_t data)
+     printf("%s: what are we supposed to do with (%08x)?\n", __func__, data);
+ }
+ 
+-static inline void vmsvga_check_size(struct vmsvga_state_s *s)
++static inline bool vmsvga_check_size(struct vmsvga_state_s *s)
+ {
+     DisplaySurface *surface = qemu_console_surface(s->vga.con);
+ 
++    /*
++     * Registers are written individually. Do not expose an incomplete mode
++     * or a surface extending beyond VRAM, including after migration.
++     */
++    if (s->new_width <= 0 || s->new_width > SVGA_MAX_WIDTH ||
++        s->new_height <= 0 || s->new_height > SVGA_MAX_HEIGHT ||
++        s->new_depth != 32 ||
++        (uint64_t)s->new_width * s->new_height * 4 > s->vga.vram_size) {
++        return false;
++    }
+     if (s->new_width != surface_width(surface) ||
+         s->new_height != surface_height(surface) ||
+         s->new_depth != surface_bits_per_pixel(surface)) {
+@@ -1137,6 +1147,7 @@ static inline void vmsvga_check_size(struct vmsvga_state_s *s)
+         qemu_console_set_surface(s->vga.con, surface);
+         s->invalidated = 1;
+     }
++    return true;
+ }
+ 
+ static bool vmsvga_update_display(void *opaque)
+@@ -1148,7 +1159,9 @@ static bool vmsvga_update_display(void *opaque)
+         return s->vga.hw_ops->gfx_update(&s->vga);
+     }
+ 
+-    vmsvga_check_size(s);
++    if (!vmsvga_check_size(s)) {
++        return true;
++    }
+ 
+     vmsvga_fifo_run(s);
+     vmsvga_update_rect_flush(s);
+diff --git a/tests/qtest/display-vga-test.c b/tests/qtest/display-vga-test.c
+index 75b341a..2858117 100644
+--- a/tests/qtest/display-vga-test.c
++++ b/tests/qtest/display-vga-test.c
+@@ -8,7 +8,126 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "qemu/units.h"
+ #include "libqtest.h"
++#include "libqos/pci-pc.h"
++
++/* VMware SVGA II register and FIFO command numbers. */
++enum {
++    SVGA_REG_ENABLE = 1,
++    SVGA_REG_WIDTH = 2,
++    SVGA_REG_HEIGHT = 3,
++    SVGA_REG_MAX_WIDTH = 4,
++    SVGA_REG_MAX_HEIGHT = 5,
++    SVGA_REG_VRAM_SIZE = 15,
++    SVGA_REG_CONFIG_DONE = 20,
++    SVGA_REG_SYNC = 21,
++    SVGA_CMD_RECT_FILL = 2,
++    SVGA_CMD_RECT_COPY = 3,
++};
++
++static void svga_write(QPCIDevice *dev, QPCIBar io,
++                       unsigned reg, unsigned value)
++{
++    qpci_io_writel(dev, io, 0, reg);
++    qpci_io_writel(dev, io, 1, value);
++}
++
++static unsigned svga_read(QPCIDevice *dev, QPCIBar io, unsigned reg)
++{
++    qpci_io_writel(dev, io, 0, reg);
++    return qpci_io_readl(dev, io, 1);
++}
++
++static void svga_dump_size(QTestState *qts, unsigned w, unsigned h)
++{
++    g_autofree char *name = NULL;
++    FILE *image;
++    unsigned actual_w, actual_h, max;
++    int fd = g_file_open_tmp("qtest-svga-XXXXXX", &name, NULL);
++
++    g_assert_cmpint(fd, >=, 0);
++    close(fd);
++    qtest_qmp_assert_success(qts, "{'execute':'screendump',"
++                            "'arguments':{'filename':%s}}", name);
++    image = fopen(name, "rb");
++    g_assert_nonnull(image);
++    g_assert_cmpint(fscanf(image, "P6 %u %u %u",
++                          &actual_w, &actual_h, &max), ==, 3);
++    g_assert_cmpuint(actual_w, ==, w);
++    g_assert_cmpuint(actual_h, ==, h);
++    g_assert_cmpuint(max, ==, 255);
++    fclose(image);
++    unlink(name);
++}
++
++static void test_svga_modes(gconstpointer data)
++{
++    bool small_vram = GPOINTER_TO_INT(data);
++    QTestState *qts = qtest_initf("-vga none -device vmware-svga,addr=04.0%s",
++                                small_vram ? "" : ",vgamem_mb=32");
++    QPCIBus *bus = qpci_new_pc(qts, NULL);
++    QPCIDevice *dev = qpci_device_find(bus, QPCI_DEVFN(4, 0));
++    QPCIBar io, fifo, fb;
++
++    g_assert_nonnull(dev);
++    io = qpci_iomap(dev, 0, NULL);
++    fb = qpci_iomap(dev, 1, NULL);
++    fifo = qpci_iomap(dev, 2, NULL);
++    qpci_device_enable(dev);
++    g_assert_cmpuint(svga_read(dev, io, SVGA_REG_MAX_WIDTH), ==, 3840);
++    g_assert_cmpuint(svga_read(dev, io, SVGA_REG_MAX_HEIGHT), ==, 2160);
++    g_assert_cmpuint(svga_read(dev, io, SVGA_REG_VRAM_SIZE), ==,
++                     (small_vram ? 16 : 32) * MiB);
++    /* Empty, valid FIFO. */
++    qpci_io_writel(dev, fifo, 0, 16);
++    qpci_io_writel(dev, fifo, 4, 65536);
++    qpci_io_writel(dev, fifo, 8, 16);
++    qpci_io_writel(dev, fifo, 12, 16);
++    svga_write(dev, io, SVGA_REG_WIDTH, 1920);
++    svga_write(dev, io, SVGA_REG_HEIGHT, 1200);
++    svga_write(dev, io, SVGA_REG_CONFIG_DONE, 1);
++    svga_write(dev, io, SVGA_REG_ENABLE, 1);
++    svga_dump_size(qts, 1920, 1200);
++    svga_write(dev, io, SVGA_REG_WIDTH, 3840);
++    svga_write(dev, io, SVGA_REG_HEIGHT, 2160);
++    /* Insufficient VRAM must retain the previous valid surface. */
++    svga_dump_size(qts, small_vram ? 1920 : 3840, small_vram ? 1200 : 2160);
++    if (!small_vram) {
++        const uint32_t fill[] = {
++            SVGA_CMD_RECT_FILL, 0x123456, 3839, 2159, 1, 1
++        };
++        const uint32_t copy[] = {
++            SVGA_CMD_RECT_COPY, 3839, 2159, 3838, 2159, 1, 1
++        };
++        uint64_t last = ((uint64_t)3840 * 2160 - 1) * 4;
++
++        for (unsigned i = 0; i < ARRAY_SIZE(fill); i++) {
++            qpci_io_writel(dev, fifo, 16 + i * 4, fill[i]);
++        }
++        qpci_io_writel(dev, fifo, 8, 16 + sizeof(fill));
++        svga_write(dev, io, SVGA_REG_SYNC, 1);
++        g_assert_cmphex(qpci_io_readl(dev, fb, last), ==, 0x123456);
++        for (unsigned i = 0; i < ARRAY_SIZE(copy); i++) {
++            qpci_io_writel(dev, fifo, 16 + sizeof(fill) + i * 4, copy[i]);
++        }
++        qpci_io_writel(dev, fifo, 8, 16 + sizeof(fill) + sizeof(copy));
++        svga_write(dev, io, SVGA_REG_SYNC, 1);
++        g_assert_cmphex(qpci_io_readl(dev, fb, last - 4), ==, 0x123456);
++    }
++    svga_write(dev, io, SVGA_REG_HEIGHT, 0);
++    svga_dump_size(qts, small_vram ? 1920 : 3840,
++                   small_vram ? 1200 : 2160);
++    svga_write(dev, io, SVGA_REG_HEIGHT, 2160);
++    svga_write(dev, io, SVGA_REG_WIDTH, 0);
++    svga_dump_size(qts, small_vram ? 1920 : 3840, small_vram ? 1200 : 2160);
++    svga_write(dev, io, SVGA_REG_WIDTH, 2560);
++    svga_write(dev, io, SVGA_REG_HEIGHT, 1600);
++    svga_dump_size(qts, 2560, 1600);
++    g_free(dev);
++    qpci_free_pc(bus);
++    qtest_quit(qts);
++}
+ 
+ static void pci_multihead(void)
+ {
+@@ -38,6 +157,13 @@ int main(int argc, char **argv)
+ 
+     g_test_init(&argc, &argv, NULL);
+ 
++    if (qtest_has_device("vmware-svga")) {
++        qtest_add_data_func("/display/vmware/4k",
++                            GINT_TO_POINTER(0), test_svga_modes);
++        qtest_add_data_func("/display/vmware/insufficient-vram",
++                            GINT_TO_POINTER(1), test_svga_modes);
++    }
++
+     for (int i = 0; i < ARRAY_SIZE(devices); i++) {
+         if (qtest_has_device(devices[i])) {
+             char *testpath = g_strdup_printf("/display/pci/%s", devices[i]);

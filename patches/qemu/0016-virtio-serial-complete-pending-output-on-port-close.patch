@@ -1,0 +1,26 @@
+Subject: [PATCH 16/16] virtio-serial: complete pending output on port close
+
+Host port close leaves its output queue live. Return a pending element
+through the used ring so the guest can reclaim its descriptor.
+
+---
+diff --git a/hw/char/virtio-serial-bus.c b/hw/char/virtio-serial-bus.c
+index c1973f0..1cd2c76 100644
+--- a/hw/char/virtio-serial-bus.c
++++ b/hw/char/virtio-serial-bus.c
+@@ -282,7 +282,14 @@ int virtio_serial_close(VirtIOSerialPort *port)
+      * consume, reset the throttling flag and discard the data.
+      */
+     port->throttled = false;
+-    discard_throttle_data(port);
++    /* Unlike a device reset, closing a host port leaves its queue live.
++     * Return the partially consumed element so the guest can reclaim it;
++     * detaching it without a used entry would permanently lose a descriptor. */
++    if (port->elem) {
++        virtqueue_push(port->ovq, port->elem, 0);
++        g_free(port->elem);
++        port->elem = NULL;
++    }
+     discard_vq_data(port->ovq, VIRTIO_DEVICE(port->vser));
+ 
+     send_control_event(port->vser, port->id, VIRTIO_CONSOLE_PORT_OPEN, 0);

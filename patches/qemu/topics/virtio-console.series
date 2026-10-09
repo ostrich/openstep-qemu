@@ -1,0 +1,2 @@
+0015-virtio-console-avoid-rethrottling-a-disconnected-port.patch
+0016-virtio-serial-complete-pending-output-on-port-close.patch

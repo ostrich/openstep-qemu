@@ -1,0 +1,119 @@
+Subject: [PATCH 13/16] esp: report DMA direction errors and FIFO overflow
+
+Set the status IOE/gross-error flag on a PCI DMA direction mismatch or
+SCSI FIFO overflow. Preserve data/counters on a direction mismatch and
+prevent FIFO overwrite; do not generate an interrupt for IOE alone.
+AMD section 5.2.3.5 specifies these conditions and acknowledgement.
+
+---
+--- a/hw/scsi/esp.c
++++ b/hw/scsi/esp.c
+@@ -171,6 +171,7 @@
+ {
+     if (fifo8_num_used(&s->fifo) == s->fifo.capacity) {
+         trace_esp_error_fifo_overrun();
++        s->rregs[ESP_RSTAT] |= STAT_GE;
+     } else {
+         fifo8_push(&s->fifo, val);
+     }
+@@ -180,6 +181,10 @@
+ 
+ static void esp_fifo_push_buf(ESPState *s, uint8_t *buf, int len)
+ {
++    if (len > fifo8_num_free(&s->fifo)) {
++        s->rregs[ESP_RSTAT] |= STAT_GE;
++        len = fifo8_num_free(&s->fifo);
++    }
+     fifo8_push_all(&s->fifo, buf, len);
+     esp_update_drq(s);
+ }
+@@ -1378,9 +1383,7 @@
+         s->rregs[ESP_RSTAT] &= ~STAT_TC;
+         break;
+     case ESP_FIFO:
+-        if (!fifo8_is_full(&s->fifo)) {
+-            esp_fifo_push(s, val);
+-        }
++        esp_fifo_push(s, val);
+         esp_do_nodma(s);
+         break;
+     case ESP_CMD:
+--- a/hw/scsi/esp-pci.c
++++ b/hw/scsi/esp-pci.c
+@@ -369,6 +369,7 @@
+ 
+     if (dir != expected_dir) {
+         trace_esp_pci_error_invalid_dma_direction();
++        pci->esp.rregs[ESP_RSTAT] |= STAT_GE;
+         return 0;
+     }
+ 
+--- a/tests/qtest/am53c974-dma-test.c
++++ b/tests/qtest/am53c974-dma-test.c
+@@ -876,6 +876,54 @@
+     qtest_quit(q);
+ }
+ 
++static void direction_error(const void *opaque)
++{
++    bool write = GPOINTER_TO_UINT(opaque);
++    QTestState *q = start();
++    uint8_t guard[512];
++
++    memset(guard, GUARD, sizeof(guard));
++    qtest_memwrite(q, FLAT, write ? fixture : guard, 512);
++    select_data(q, write, 512);
++    begin_dma(q, false, !write, 512, FLAT, 0);
++    reg_write(q, 3, 0x90);
++    g_assert_cmphex(reg_read(q, 4) & 0xc0, ==, 0x40);
++    g_assert_cmphex(dma_read(q, 3), ==, 512);
++    g_assert_cmphex(dma_read(q, 4), ==, FLAT);
++    check_bytes(q, FLAT, write ? fixture : guard, 512);
++    g_assert_cmphex(reg_read(q, 5), ==, 0);
++    g_assert_cmphex(reg_read(q, 4) & 0x40, ==, 0);
++    begin_dma(q, false, write, 512, FLAT, 0);
++    wait_dma(q);
++    g_assert_cmphex(finish_command(q), ==, 0);
++    check_bytes(q, FLAT, fixture, 512);
++    qtest_quit(q);
++}
++
++static void fifo_error(void)
++{
++    QTestState *q = start();
++
++    for (unsigned i = 0; i < 16; i++) {
++        reg_write(q, 2, i);
++    }
++    g_assert_cmphex(reg_read(q, 4) & 0xc0, ==, 0);
++    reg_write(q, 2, 0xaa);
++    g_assert_cmphex(reg_read(q, 4) & 0xc0, ==, 0x40);
++    g_assert_cmphex(reg_read(q, 7) & 31, ==, 16);
++    for (unsigned i = 0; i < 16; i++) {
++        g_assert_cmphex(reg_read(q, 2), ==, i);
++    }
++    g_assert_cmphex(reg_read(q, 5), ==, 0);
++    g_assert_cmphex(reg_read(q, 4) & 0x40, ==, 0);
++    for (unsigned i = 0; i < 17; i++) {
++        reg_write(q, 2, i);
++    }
++    reg_write(q, 3, 2);
++    g_assert_cmphex(reg_read(q, 4) & 0x40, ==, 0);
++    qtest_quit(q);
++}
++
+ int main(int argc, char **argv)
+ {
+     int fd, i;
+@@ -911,6 +959,11 @@
+     qtest_add_func("/am53c974/registers", registers);
+     qtest_add_func("/am53c974/byte-lanes", byte_lanes);
+     qtest_add_func("/am53c974/illegal-commands", illegal_commands);
++    qtest_add_data_func("/am53c974/read/direction-error", GUINT_TO_POINTER(0),
++                        direction_error);
++    qtest_add_data_func("/am53c974/write/direction-error", GUINT_TO_POINTER(1),
++                        direction_error);
++    qtest_add_func("/am53c974/fifo-error", fifo_error);
+     qtest_add_func("/am53c974/reserved-command-lane", reserved_command_lane);
+     qtest_add_func("/am53c974/descriptor-error", descriptor_error);
+     qtest_add_data_func("/am53c974/read/data-error", GUINT_TO_POINTER(0),

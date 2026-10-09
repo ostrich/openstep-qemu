@@ -1,0 +1,332 @@
+Subject: [PATCH 7/16] esp-pci: implement Am53C974 MDL DMA and channel semantics
+
+Implement the page-descriptor mechanism documented in AMD's 1993
+Am53C974 manual, chapter 6. Stop and report failed PCI accesses;
+preserve partial transfers, DMA events and the separate ESP FIFO.
+
+---
+--- a/hw/scsi/esp-pci.c
++++ b/hw/scsi/esp-pci.c
+@@ -24,6 +24,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "qemu/bswap.h"
+ #include "hw/pci/pci_device.h"
+ #include "hw/core/irq.h"
+ #include "hw/nvram/eeprom93xx.h"
+@@ -74,6 +75,7 @@
+     MemoryRegion io;
+     uint32_t dma_regs[8];
+     uint32_t sbac;
++    bool page_irq;
+     ESPState esp;
+ };
+ 
+@@ -81,8 +83,11 @@
+ {
+     int scsi_level = !!(pci->dma_regs[DMA_STAT] & DMA_STAT_SCSIINT);
+     int dma_level = (pci->dma_regs[DMA_CMD] & DMA_CMD_INTE_D) ?
+-                    !!(pci->dma_regs[DMA_STAT] & DMA_STAT_DONE) : 0;
+-    int level = scsi_level || dma_level;
++                    !!(pci->dma_regs[DMA_STAT] &
++                       (DMA_STAT_DONE | DMA_STAT_ERROR)) : 0;
++    int level = scsi_level || dma_level ||
++                (pci->page_irq && (pci->dma_regs[DMA_CMD] & DMA_CMD_INTE_P)) ||
++                !!(pci->dma_regs[DMA_STAT] & DMA_STAT_ABORT);
+ 
+     pci_set_irq(PCI_DEVICE(pci), level);
+ }
+@@ -93,18 +98,6 @@
+ 
+     if (level) {
+         pci->dma_regs[DMA_STAT] |= DMA_STAT_SCSIINT;
+-
+-        /*
+-         * If raising the ESP IRQ to indicate end of DMA transfer, set
+-         * DMA_STAT_DONE at the same time. In theory this should be done in
+-         * esp_pci_dma_memory_rw(), however there is a delay between setting
+-         * DMA_STAT_DONE and the ESP IRQ arriving which is visible to the
+-         * guest that can cause confusion e.g. Linux
+-         */
+-        if ((pci->dma_regs[DMA_CMD] & DMA_CMD_MASK) == 0x3 &&
+-            pci->dma_regs[DMA_WBC] == 0) {
+-                pci->dma_regs[DMA_STAT] |= DMA_STAT_DONE;
+-        }
+     } else {
+         pci->dma_regs[DMA_STAT] &= ~DMA_STAT_SCSIINT;
+     }
+@@ -123,7 +116,11 @@
+ static void esp_pci_handle_blast(PCIESPState *pci, uint32_t val)
+ {
+     trace_esp_pci_dma_blast(val);
+-    qemu_log_mask(LOG_UNIMP, "am53c974: cmd BLAST not implemented\n");
++    /*
++     * There is no intermediate DMA FIFO: writes go directly to memory.
++     * BLAST therefore has no residual DMA bytes to drain. The ESP FIFO is
++     * separate and remains available to software, including odd-byte PIO.
++     */
+     pci->dma_regs[DMA_STAT] |= DMA_STAT_BCMBLT;
+ }
+ 
+@@ -132,9 +129,37 @@
+     ESPState *s = &pci->esp;
+ 
+     trace_esp_pci_dma_abort(val);
+-    if (s->current_req) {
+-        scsi_req_cancel(s->current_req);
+-    }
++    esp_dma_enable(s, 0, 0);
++    pci->dma_regs[DMA_STAT] |= DMA_STAT_ABORT;
++    esp_pci_update_irq(pci);
++}
++
++static void esp_pci_dma_error(PCIESPState *pci, MemTxResult result)
++{
++    esp_dma_enable(&pci->esp, 0, 0);
++    pci->dma_regs[DMA_STAT] |= DMA_STAT_ERROR | DMA_STAT_ABORT;
++    pci_set_word(pci->parent_obj.config + PCI_STATUS,
++                 pci_get_word(pci->parent_obj.config + PCI_STATUS) |
++                 (result & MEMTX_DECODE_ERROR ? PCI_STATUS_REC_MASTER_ABORT :
++                  PCI_STATUS_REC_TARGET_ABORT));
++    esp_pci_update_irq(pci);
++}
++
++static bool esp_pci_mdl_fetch(PCIESPState *pci, uint32_t offset)
++{
++    uint32_t page;
++    MemTxResult result = pci_dma_read(PCI_DEVICE(pci),
++                                     pci->dma_regs[DMA_WMAC],
++                                     &page, sizeof(page));
++
++    if (result != MEMTX_OK) {
++        esp_pci_dma_error(pci, result);
++        return false;
++    }
++    page = le32_to_cpu(page) & ~0xfffU;
++    pci->dma_regs[DMA_SPA] = page | (pci->dma_regs[DMA_SPA] & 0xfffU);
++    pci->dma_regs[DMA_WAC] = page | offset;
++    return true;
+ }
+ 
+ static void esp_pci_handle_start(PCIESPState *pci, uint32_t val)
+@@ -142,14 +167,23 @@
+     ESPState *s = &pci->esp;
+ 
+     trace_esp_pci_dma_start(val);
++    esp_dma_enable(s, 0, 0);
++    pci->page_irq = false;
+ 
+     pci->dma_regs[DMA_WBC] = pci->dma_regs[DMA_STC];
+     pci->dma_regs[DMA_WAC] = pci->dma_regs[DMA_SPA];
+     pci->dma_regs[DMA_WMAC] = pci->dma_regs[DMA_SMDLA];
+-
+-    pci->dma_regs[DMA_STAT] &= ~(DMA_STAT_BCMBLT | DMA_STAT_SCSIINT
+-                               | DMA_STAT_DONE | DMA_STAT_ABORT
+-                               | DMA_STAT_ERROR | DMA_STAT_PWDN);
++    pci->dma_regs[DMA_STAT] &= ~(DMA_STAT_BCMBLT | DMA_STAT_DONE |
++                               DMA_STAT_ABORT | DMA_STAT_ERROR | DMA_STAT_PWDN);
++    if (pci->dma_regs[DMA_WBC] && (val & DMA_CMD_MDL) &&
++        !esp_pci_mdl_fetch(pci, pci->dma_regs[DMA_SPA] & 0xfffU)) {
++        return;
++    }
++    if (!pci->dma_regs[DMA_WBC]) {
++        pci->dma_regs[DMA_STAT] |= DMA_STAT_DONE;
++        esp_pci_update_irq(pci);
++        return;
++    }
+ 
+     esp_dma_enable(s, 0, 1);
+ }
+@@ -176,10 +210,15 @@
+         default: /* can't happen */
+             abort();
+         }
++        esp_pci_update_irq(pci);
+         break;
+     case DMA_STC:
++        pci->dma_regs[saddr] = val & 0xffffff;
++        break;
++    case DMA_SMDLA:
++        pci->dma_regs[saddr] = val & ~3U;
++        break;
+     case DMA_SPA:
+-    case DMA_SMDLA:
+         pci->dma_regs[saddr] = val;
+         break;
+     case DMA_STAT:
+@@ -202,6 +241,8 @@
+ 
+     val = pci->dma_regs[saddr];
+     if (saddr == DMA_STAT) {
++        pci->page_irq = false;
++        esp_pci_update_irq(pci);
+         if (!(pci->sbac & SBAC_STATUS)) {
+             pci->dma_regs[DMA_STAT] &= ~(DMA_STAT_ERROR | DMA_STAT_ABORT |
+                                          DMA_STAT_DONE);
+@@ -288,10 +329,11 @@
+     return ret;
+ }
+ 
+-static void esp_pci_dma_memory_rw(PCIESPState *pci, uint8_t *buf, int len,
++static int esp_pci_dma_memory_rw(PCIESPState *pci, uint8_t *buf, int len,
+                                   DMADirection dir)
+ {
+     dma_addr_t addr;
++    int transferred = 0;
+     DMADirection expected_dir;
+ 
+     if (pci->dma_regs[DMA_CMD] & DMA_CMD_DIR) {
+@@ -302,37 +344,65 @@
+ 
+     if (dir != expected_dir) {
+         trace_esp_pci_error_invalid_dma_direction();
+-        return;
+-    }
+-
+-    if (pci->dma_regs[DMA_STAT] & DMA_CMD_MDL) {
+-        qemu_log_mask(LOG_UNIMP, "am53c974: MDL transfer not implemented\n");
+-    }
+-
+-    addr = pci->dma_regs[DMA_WAC];
++        return 0;
++    }
++
++    if (!pci->esp.dma_enabled) {
++        return 0;
++    }
+     if (pci->dma_regs[DMA_WBC] < len) {
+         len = pci->dma_regs[DMA_WBC];
+     }
+-
+-    pci_dma_rw(PCI_DEVICE(pci), addr, buf, len, dir, MEMTXATTRS_UNSPECIFIED);
+-
+-    /* update status registers */
+-    pci->dma_regs[DMA_WBC] -= len;
+-    pci->dma_regs[DMA_WAC] += len;
++    while (len > 0) {
++        MemTxResult result;
++        int chunk;
++
++        addr = pci->dma_regs[DMA_WAC];
++        /* Keep a failed following page from hiding bytes already moved. */
++        chunk = MIN(len, 4096 - (addr & 0xfff));
++        result = pci_dma_rw(PCI_DEVICE(pci), addr, buf, chunk, dir,
++                            MEMTXATTRS_UNSPECIFIED);
++        if (result != MEMTX_OK) {
++            esp_pci_dma_error(pci, result);
++            return transferred;
++        }
++        transferred += chunk;
++        pci->dma_regs[DMA_WBC] -= chunk;
++        pci->dma_regs[DMA_WAC] += chunk;
++        buf += chunk;
++        len -= chunk;
++        if ((pci->dma_regs[DMA_CMD] & DMA_CMD_MDL) &&
++            !(pci->dma_regs[DMA_WAC] & 0xfff)) {
++            pci->page_irq = true;
++            esp_pci_update_irq(pci);
++        }
++        if ((pci->dma_regs[DMA_CMD] & DMA_CMD_MDL) &&
++            !(pci->dma_regs[DMA_WAC] & 0xfff) &&
++            pci->dma_regs[DMA_WBC]) {
++            pci->dma_regs[DMA_WMAC] += 4;
++            if (!esp_pci_mdl_fetch(pci, 0)) {
++                return transferred;
++            }
++        }
++    }
++    if (!pci->dma_regs[DMA_WBC]) {
++        esp_dma_enable(&pci->esp, 0, 0);
++        pci->dma_regs[DMA_STAT] |= DMA_STAT_DONE;
++        esp_pci_update_irq(pci);
++    }
++    return transferred;
+ }
+ 
+ static int esp_pci_dma_memory_read(void *opaque, uint8_t *buf, int len)
+ {
+     PCIESPState *pci = opaque;
+-    esp_pci_dma_memory_rw(pci, buf, len, DMA_DIRECTION_TO_DEVICE);
+-    return len;
++    return esp_pci_dma_memory_rw(pci, buf, len, DMA_DIRECTION_TO_DEVICE);
+ }
+ 
+ static int esp_pci_dma_memory_write(void *opaque, uint8_t *buf, int len)
+ {
+     PCIESPState *pci = opaque;
+-    esp_pci_dma_memory_rw(pci, buf, len, DMA_DIRECTION_FROM_DEVICE);
+-    return len;
++    return esp_pci_dma_memory_rw(pci, buf, len, DMA_DIRECTION_FROM_DEVICE);
+ }
+ 
+ static const MemoryRegionOps esp_pci_io_ops = {
+@@ -351,14 +421,45 @@
+     ESPState *s = &pci->esp;
+ 
+     esp_hard_reset(s);
++    esp_dma_enable(s, 0, 0);
+     pci->dma_regs[DMA_CMD] &= ~(DMA_CMD_DIR | DMA_CMD_INTE_D | DMA_CMD_INTE_P
+                               | DMA_CMD_MDL | DMA_CMD_DIAG | DMA_CMD_MASK);
+-    pci->dma_regs[DMA_WBC] &= ~0xffff;
++    pci->dma_regs[DMA_WBC] = 0;
+     pci->dma_regs[DMA_WAC] = 0xffffffff;
+     pci->dma_regs[DMA_STAT] &= ~(DMA_STAT_BCMBLT | DMA_STAT_SCSIINT
+                                | DMA_STAT_DONE | DMA_STAT_ABORT
+                                | DMA_STAT_ERROR);
+-    pci->dma_regs[DMA_WMAC] = 0xfffffffd;
++    pci->dma_regs[DMA_WMAC] = 0xfffffffc;
++    pci->page_irq = false;
++    esp_pci_update_irq(pci);
++}
++
++static bool esp_pci_page_irq_needed(void *opaque)
++{
++    return PCI_ESP(opaque)->page_irq;
++}
++
++static const VMStateDescription vmstate_esp_pci_page_irq = {
++    .name = "pciespscsi/page-irq",
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .needed = esp_pci_page_irq_needed,
++    .fields = (const VMStateField[]) {
++        VMSTATE_BOOL(page_irq, PCIESPState),
++        VMSTATE_END_OF_LIST()
++    },
++};
++
++static int esp_pci_post_load(void *opaque, int version_id)
++{
++    esp_pci_update_irq(PCI_ESP(opaque));
++    return 0;
++}
++
++static int esp_pci_pre_load(void *opaque)
++{
++    PCI_ESP(opaque)->page_irq = false;
++    return 0;
+ }
+ 
+ static const VMStateDescription vmstate_esp_pci_scsi = {
+@@ -366,13 +467,19 @@
+     .version_id = 2,
+     .minimum_version_id = 1,
+     .pre_save = esp_pre_save,
++    .pre_load = esp_pci_pre_load,
++    .post_load = esp_pci_post_load,
+     .fields = (const VMStateField[]) {
+         VMSTATE_PCI_DEVICE(parent_obj, PCIESPState),
+         VMSTATE_BUFFER_UNSAFE(dma_regs, PCIESPState, 0, 8 * sizeof(uint32_t)),
+         VMSTATE_UINT8_V(esp.mig_version_id, PCIESPState, 2),
+         VMSTATE_STRUCT(esp, PCIESPState, 0, vmstate_esp, ESPState),
+         VMSTATE_END_OF_LIST()
+-    }
++    },
++    .subsections = (const VMStateDescription *const[]) {
++        &vmstate_esp_pci_page_irq,
++        NULL
++    },
+ };
+ 
+ static const struct SCSIBusInfo esp_pci_scsi_info = {

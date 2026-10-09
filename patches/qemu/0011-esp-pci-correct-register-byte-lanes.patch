@@ -1,0 +1,217 @@
+Subject: [PATCH 11/16] esp-pci: correct byte lanes and reserved register accesses
+
+Handle byte/word writes in their little-endian lanes and split accesses
+that cross a register boundary. Ignore reserved SCSI, command and status
+lanes rather than repeating FIFO, command or acknowledgement side effects.
+AMD's manual maps the core to low bytes and the DMA block to DWORDs.
+
+---
+--- a/hw/scsi/esp-pci.c
++++ b/hw/scsi/esp-pci.c
+@@ -193,6 +193,7 @@
+     trace_esp_pci_dma_write(saddr, pci->dma_regs[saddr], val);
+     switch (saddr) {
+     case DMA_CMD:
++        val &= 0xff;
+         pci->dma_regs[saddr] = val;
+         switch (val & DMA_CMD_MASK) {
+         case 0x0: /* IDLE */
+@@ -260,15 +261,37 @@
+     PCIESPState *pci = opaque;
+     ESPState *s = &pci->esp;
+ 
++    if ((addr & 3) + size > 4) {
++        for (unsigned i = 0; i < size; i++) {
++            esp_pci_io_write(opaque, addr + i, (val >> (i * 8)) & 0xff, 1);
++        }
++        return;
++    }
++
++    /* Only the low byte of a SCSI register is implemented. */
++    if (addr < 0x40) {
++        if (!(addr & 3)) {
++            esp_reg_write(s, addr >> 2, val & 0xff);
++        }
++        return;
++    }
++    /* Reserved command/status lanes must not replay command or W1C bits. */
++    if ((addr & 3) && (addr & ~3) == 0x40) {
++        return;
++    }
++    if ((addr & 3) && (addr & ~3) == 0x54) {
++        return;
++    }
++
+     if (size < 4 || addr & 3) {
+         /* need to upgrade request: we only support 4-bytes accesses */
+         uint32_t current = 0, mask;
+         int shift;
+ 
+-        if (addr < 0x40) {
+-            current = s->wregs[addr >> 2];
+-        } else if (addr < 0x60) {
+-            current = pci->dma_regs[(addr - 0x40) >> 2];
++        if (addr < 0x60) {
++            if ((addr & ~3) != 0x54) {
++                current = pci->dma_regs[(addr - 0x40) >> 2];
++            }
+         } else if (addr < 0x74) {
+             current = pci->sbac;
+         }
+@@ -276,7 +299,7 @@
+         shift = (4 - size) * 8;
+         mask = (~(uint32_t)0 << shift) >> shift;
+ 
+-        shift = ((4 - (addr & 3)) & 3) * 8;
++        shift = (addr & 3) * 8;
+         val <<= shift;
+         val |= current & ~(mask << shift);
+         addr &= ~3;
+@@ -284,10 +307,7 @@
+     }
+     g_assert(size >= 4);
+ 
+-    if (addr < 0x40) {
+-        /* SCSI core reg */
+-        esp_reg_write(s, addr >> 2, val);
+-    } else if (addr < 0x60) {
++    if (addr < 0x60) {
+         /* PCI DMA CCB */
+         esp_pci_dma_write(pci, (addr - 0x40) >> 2, val);
+     } else if (addr == 0x70) {
+@@ -306,10 +326,26 @@
+     ESPState *s = &pci->esp;
+     uint32_t ret;
+ 
++    if ((addr & 3) + size > 4) {
++        uint64_t value = 0;
++
++        for (unsigned i = 0; i < size; i++) {
++            value |= esp_pci_io_read(opaque, addr + i, 1) << (i * 8);
++        }
++        return value;
++    }
++
+     if (addr < 0x40) {
+         /* SCSI core reg */
++        if (addr & 3) {
++            return 0;
++        }
+         ret = esp_reg_read(s, addr >> 2);
+     } else if (addr < 0x60) {
++        /* Reading reserved status lanes must not acknowledge DMA events. */
++        if ((addr & ~3) == 0x54 && (addr & 3)) {
++            return 0;
++        }
+         /* PCI DMA CCB */
+         ret = esp_pci_dma_read(pci, (addr - 0x40) >> 2);
+     } else if (addr == 0x70) {
+@@ -409,9 +445,15 @@
+     .read = esp_pci_io_read,
+     .write = esp_pci_io_write,
+     .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid = {
++        .min_access_size = 1,
++        .max_access_size = 4,
++        .unaligned = true,
++    },
+     .impl = {
+         .min_access_size = 1,
+         .max_access_size = 4,
++        .unaligned = true,
+     },
+ };
+ 
+--- a/tests/qtest/am53c974-dma-test.c
++++ b/tests/qtest/am53c974-dma-test.c
+@@ -108,6 +108,12 @@
+         reg_write(q, 2, cdb[i]);
+     }
+     reg_write(q, 3, 0x42);
++    /* The backend may deliver its first data buffer asynchronously. */
++    int64_t deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
++    while (!(reg_read(q, 4) & 0x80)) {
++        g_assert_cmpint(g_get_monotonic_time(), <, deadline);
++        qtest_clock_step(q, 1000000);
++    }
+     reg_read(q, 5);
+     reg_write(q, 0, size);
+     reg_write(q, 1, size >> 8);
+@@ -786,6 +792,68 @@
+     qtest_quit(q);
+ }
+ 
++static void byte_lanes(void)
++{
++    QTestState *q = start();
++
++    dma_write(q, 1, 0x112233);
++    qtest_outb(q, IO + 0x45, 0x7a);
++    g_assert_cmphex(dma_read(q, 1), ==, 0x117a33);
++    qtest_outw(q, IO + 0x45, 0xbeef);
++    g_assert_cmphex(dma_read(q, 1), ==, 0xbeef33);
++    qtest_outb(q, IO + 0x47, 0xff);
++    g_assert_cmphex(dma_read(q, 1), ==, 0xbeef33);
++    dma_write(q, 2, 0x11223344);
++    qtest_outb(q, IO + 0x4b, 0x7a);
++    g_assert_cmphex(dma_read(q, 2), ==, 0x7a223344);
++    qtest_outw(q, IO + 0x4a, 0xbeef);
++    g_assert_cmphex(dma_read(q, 2), ==, 0xbeef3344);
++    qtest_outw(q, IO + 0x47, 0x8f7e); /* Reserved STC byte / SPA low byte. */
++    g_assert_cmphex(dma_read(q, 1), ==, 0xbeef33);
++    g_assert_cmphex(dma_read(q, 2), ==, 0xbeef338f);
++    qtest_outl(q, IO + 0x49, 0x88776655); /* Ends in read-only WBC. */
++    g_assert_cmphex(dma_read(q, 2), ==, 0x7766558f);
++    g_assert_cmphex(dma_read(q, 3), ==, 0);
++    g_assert_cmphex(qtest_inw(q, IO + 0x47), ==, 0x8f00);
++    g_assert_cmphex(qtest_inl(q, IO + 0x49), ==, 0x00776655);
++    dma_write(q, 0, 2);
++    g_assert_cmphex(qtest_inb(q, IO + 0x55), ==, 0);
++    g_assert_cmphex(dma_read(q, 5) & ABORT, ==, ABORT);
++    dma_write(q, 0, 2);
++    qtest_outb(q, IO + 0x73, 1); /* Status write-to-clear. */
++    qtest_outb(q, IO + 0x55, 0xff);
++    g_assert_cmphex(dma_read(q, 5) & ABORT, ==, ABORT);
++    qtest_outb(q, IO + 0x54, ABORT);
++    g_assert_cmphex(dma_read(q, 5) & ABORT, ==, 0);
++    reg_write(q, 2, 0x5a);
++    qtest_outb(q, IO + 9, 0x77); /* Reserved FIFO lane. */
++    g_assert_cmphex(reg_read(q, 7) & 31, ==, 1);
++    g_assert_cmphex(qtest_inb(q, IO + 9), ==, 0);
++    g_assert_cmphex(reg_read(q, 7) & 31, ==, 1);
++    g_assert_cmphex(reg_read(q, 2), ==, 0x5a);
++    reg_write(q, 3, 3); /* Generate a reset interrupt. */
++    g_assert_cmphex(qtest_inb(q, IO + 0x15), ==, 0);
++    g_assert_cmphex(reg_read(q, 4) & 0x80, ==, 0x80);
++    g_assert_cmphex(reg_read(q, 5), ==, 0x80);
++    qtest_quit(q);
++}
++
++static void reserved_command_lane(void)
++{
++    QTestState *q = start();
++
++    select_data(q, false, 512);
++    reg_write(q, 0, 64);
++    reg_write(q, 1, 0);
++    begin_dma(q, false, false, 512, FLAT, 0);
++    reg_write(q, 3, 0x90);
++    g_assert_cmphex(dma_read(q, 3), ==, 448);
++    qtest_outb(q, IO + 0x41, 0xff);
++    g_assert_cmphex(dma_read(q, 3), ==, 448);
++    g_assert_cmphex(dma_read(q, 4), ==, FLAT + 64);
++    qtest_quit(q);
++}
++
+ int main(int argc, char **argv)
+ {
+     int fd, i;
+@@ -819,6 +887,8 @@
+         qtest_add_data_func(restart_name, GUINT_TO_POINTER(i), restart);
+     }
+     qtest_add_func("/am53c974/registers", registers);
++    qtest_add_func("/am53c974/byte-lanes", byte_lanes);
++    qtest_add_func("/am53c974/reserved-command-lane", reserved_command_lane);
+     qtest_add_func("/am53c974/descriptor-error", descriptor_error);
+     qtest_add_data_func("/am53c974/read/data-error", GUINT_TO_POINTER(0),
+                         access_error);

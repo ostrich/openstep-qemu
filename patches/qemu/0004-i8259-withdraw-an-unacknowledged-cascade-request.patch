@@ -1,0 +1,265 @@
+Subject: [PATCH 4/16] i8259: withdraw an unacknowledged cascade request
+
+When the slave masks a pending request behind a timer ISR, its INT output
+falls but the master retains IRQ2 in IRR. Timer EOI then acknowledges a stale
+cascade with no eligible slave request. OPENSTEP's spurious IRQ15 path omits
+master EOI and subsequent disk interrupts remain blocked by ISR2.
+
+Withdraw the pending cascade on falling IRQ2 in cascaded mode. Preserve ISR
+priority, guest-selected SFNM, and the existing ordinary IRQ pulse contract.
+Exclude single-controller mode. Test wired slave masking, normal nesting,
+SFNM, AEOI, and input withdrawal/reassertion. The OPENSTEP installer progresses
+past its former CD-root stall under TCG without changing guest binaries.
+
+Intel's pre-INTA input requirement motivates withdrawal; this is a focused
+cascade correction, not a complete two-cycle INTA timing model. The migration
+layout is unchanged. Physical 8259/PIIX measurements remain unavailable.
+
+---
+diff --git a/MAINTAINERS b/MAINTAINERS
+index e53f9d0..206dfaa 100644
+--- a/MAINTAINERS
++++ b/MAINTAINERS
+@@ -2079,6 +2079,7 @@ F: hw/input/pckbd.c
+ F: hw/intc/apic*
+ F: hw/intc/ioapic*
+ F: hw/intc/i8259*
++F: tests/qtest/i8259-test.c
+ F: hw/isa/isa-superio.c
+ F: hw/misc/debugexit.c
+ F: hw/misc/pc-testdev.c
+diff --git a/hw/intc/i8259.c b/hw/intc/i8259.c
+index 8f2aa1f..0309fa7 100644
+--- a/hw/intc/i8259.c
++++ b/hw/intc/i8259.c
+@@ -25,6 +25,7 @@
+ #include "qemu/osdep.h"
+ #include "hw/intc/i8259.h"
+ #include "hw/core/irq.h"
++#include "hw/core/qdev-properties.h"
+ #include "hw/isa/isa.h"
+ #include "qemu/timer.h"
+ #include "qemu/log.h"
+@@ -148,6 +149,10 @@ static void pic_set_irq(void *opaque, int irq, int level)
+             s->last_irr |= mask;
+         } else {
+             s->last_irr &= ~mask;
++            /* The slave withdrew its request before master acknowledge. */
++            if (s->master && irq == 2 && !s->single_mode) {
++                s->irr &= ~mask;
++            }
+         }
+     }
+     pic_update_irq(s);
+diff --git a/tests/qtest/i8259-test.c b/tests/qtest/i8259-test.c
+new file mode 100644
+index 0000000..e8d532a
+--- /dev/null
++++ b/tests/qtest/i8259-test.c
+@@ -0,0 +1,194 @@
++/*
++ * i8259 cascade and interrupt priority tests.
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#include "qemu/osdep.h"
++#include "qobject/qdict.h"
++#include "qobject/qlist.h"
++#include "libqtest.h"
++
++static char *find_pic(QTestState *qts, bool master)
++{
++    g_autoptr(QDict) reply = qtest_qmp(qts,
++        "{'execute':'qom-list',"
++        " 'arguments':{'path':'/machine/unattached'}}");
++    QList *children = qdict_get_qlist(reply, "return");
++    const QListEntry *entry;
++
++    QLIST_FOREACH_ENTRY(children, entry) {
++        QDict *child = qobject_to(QDict, qlist_entry_obj(entry));
++        if (!strcmp(qdict_get_str(child, "type"), "child<isa-i8259>")) {
++            g_autofree char *path = g_strdup_printf("/machine/unattached/%s",
++                                                  qdict_get_str(child, "name"));
++            if (qtest_qom_get_bool(qts, path, "master") == master) {
++                return g_steal_pointer(&path);
++            }
++        }
++    }
++    g_assert_not_reached();
++}
++
++static void test_cascade(gconstpointer opaque)
++{
++    unsigned mode = GPOINTER_TO_UINT(opaque);
++    bool fnm = mode == 2;
++    QTestState *qts = qtest_init("-machine pc -nodefaults");
++    g_autofree char *master = find_pic(qts, true);
++
++    qtest_outb(qts, 0x20, 0x11); /* edge triggered, ICW4 follows */
++    qtest_outb(qts, 0x21, 0x40); /* vector base */
++    qtest_outb(qts, 0x21, 0x04); /* slave on IRQ2 */
++    qtest_outb(qts, 0x21, fnm ? 0x11 : 0x01); /* no auto-EOI */
++    qtest_outb(qts, 0x21, 0x00); /* unmask */
++
++    qtest_set_irq_in(qts, master, NULL, 2, 1);
++    qtest_outb(qts, 0x20, 0x0c); /* polling interrupt acknowledge */
++    g_assert_cmphex(qtest_inb(qts, 0x20), ==, 0x82);
++    qtest_set_irq_in(qts, master, NULL, 2, 0);
++    qtest_set_irq_in(qts, master, NULL, 2, 1);
++    qtest_outb(qts, 0x20, 0x0c);
++    g_assert_cmphex(qtest_inb(qts, 0x20), ==, fnm ? 0x82 : 0x00);
++
++    /* The compatibility setting must not relax other master priorities. */
++    qtest_outb(qts, 0x20, 0x62); /* specific EOI for IRQ2 */
++    qtest_set_irq_in(qts, master, NULL, 1, 1);
++    qtest_outb(qts, 0x20, 0x0c);
++    g_assert_cmphex(qtest_inb(qts, 0x20), ==, 0x81);
++    qtest_set_irq_in(qts, master, NULL, 2, 0);
++    qtest_set_irq_in(qts, master, NULL, 2, 1);
++    qtest_outb(qts, 0x20, 0x0c);
++    g_assert_cmphex(qtest_inb(qts, 0x20), ==, 0x00);
++    qtest_outb(qts, 0x20, 0x61); /* IRQ1 EOI releases pending cascade */
++    qtest_outb(qts, 0x20, 0x0c);
++    g_assert_cmphex(qtest_inb(qts, 0x20), ==, 0x82);
++
++    qtest_quit(qts);
++}
++
++static void test_withdrawn_cascade(void)
++{
++    QTestState *qts = qtest_init("-machine pc -nodefaults");
++    g_autofree char *master = find_pic(qts, true);
++
++    qtest_outb(qts, 0x20, 0x11);
++    qtest_outb(qts, 0x21, 0x40);
++    qtest_outb(qts, 0x21, 4);
++    qtest_outb(qts, 0x21, 1);
++    qtest_outb(qts, 0x21, 0xfa);
++    qtest_set_irq_in(qts, master, NULL, 0, 1);
++    qtest_outb(qts, 0x20, 0x0c);
++    g_assert_cmphex(qtest_inb(qts, 0x20), ==, 0x80);
++    qtest_set_irq_in(qts, master, NULL, 0, 0);
++    /* A cascade edge occurs while a higher priority IRQ is in service. */
++    qtest_set_irq_in(qts, master, NULL, 2, 1);
++    qtest_outb(qts, 0x20, 0x0a);
++    g_assert_cmphex(qtest_inb(qts, 0x20) & 4, ==, 4);
++    qtest_set_irq_in(qts, master, NULL, 2, 0);
++    qtest_outb(qts, 0x20, 0x0a);
++    g_assert_cmphex(qtest_inb(qts, 0x20) & 4, ==, 0);
++    qtest_outb(qts, 0x20, 0x20);
++    qtest_outb(qts, 0x20, 0x0c);
++    g_assert_cmphex(qtest_inb(qts, 0x20), ==, 0);
++    qtest_outb(qts, 0x20, 0x0b);
++    g_assert_cmphex(qtest_inb(qts, 0x20), ==, 0);
++    /* A subsequent live cascade request must still be acknowledged. */
++    qtest_set_irq_in(qts, master, NULL, 2, 1);
++    qtest_outb(qts, 0x20, 0x0c);
++    g_assert_cmphex(qtest_inb(qts, 0x20), ==, 0x82);
++    qtest_set_irq_in(qts, master, NULL, 2, 0);
++    qtest_outb(qts, 0x20, 0x0b);
++    g_assert_cmphex(qtest_inb(qts, 0x20), ==, 4);
++    qtest_quit(qts);
++}
++
++static uint8_t poll_pic(QTestState *qts, uint16_t base)
++{
++    qtest_outb(qts, base, 0x0c);
++    return qtest_inb(qts, base);
++}
++
++static void test_slave_masking(void)
++{
++    QTestState *qts = qtest_init("-machine pc -nodefaults");
++    g_autofree char *master = find_pic(qts, true);
++    g_autofree char *slave = find_pic(qts, false);
++
++    qtest_outb(qts, 0x20, 0x11);
++    qtest_outb(qts, 0x21, 0x40);
++    qtest_outb(qts, 0x21, 4);
++    qtest_outb(qts, 0x21, 1);
++    qtest_outb(qts, 0x21, 0xfa);
++    qtest_outb(qts, 0xa0, 0x11);
++    qtest_outb(qts, 0xa1, 0x48);
++    qtest_outb(qts, 0xa1, 2);
++    qtest_outb(qts, 0xa1, 1);
++    qtest_outb(qts, 0xa1, 0x7f);
++    qtest_set_irq_in(qts, master, NULL, 0, 1);
++    g_assert_cmphex(poll_pic(qts, 0x20), ==, 0x80);
++    qtest_set_irq_in(qts, master, NULL, 0, 0);
++    qtest_set_irq_in(qts, slave, NULL, 7, 1);
++    qtest_outb(qts, 0xa1, 0xff);
++    qtest_outb(qts, 0x20, 0x20);
++    /* No stale cascade may enter service while the slave is masked. */
++    g_assert_cmphex(poll_pic(qts, 0x20), ==, 0);
++    g_assert_cmphex(poll_pic(qts, 0xa0), ==, 0);
++    qtest_outb(qts, 0xa0, 0x0a);
++    g_assert_cmphex(qtest_inb(qts, 0xa0), ==, 0x80);
++    qtest_outb(qts, 0xa1, 0x7f);
++    g_assert_cmphex(poll_pic(qts, 0x20), ==, 0x82);
++    g_assert_cmphex(poll_pic(qts, 0xa0), ==, 0x87);
++    qtest_set_irq_in(qts, slave, NULL, 7, 0);
++    qtest_outb(qts, 0xa0, 0x20);
++    qtest_outb(qts, 0x20, 0x20);
++    g_assert_cmphex(poll_pic(qts, 0x20), ==, 0);
++    /* Ordinary pulsed edge IRQs retain the established device contract. */
++    qtest_outb(qts, 0x21, 0xda);
++    qtest_set_irq_in(qts, master, NULL, 5, 1);
++    qtest_set_irq_in(qts, master, NULL, 5, 0);
++    g_assert_cmphex(poll_pic(qts, 0x20), ==, 0x85);
++    qtest_quit(qts);
++}
++
++static void test_cascade_modes(const void *opaque)
++{
++    bool single = GPOINTER_TO_UINT(opaque) != 0;
++    QTestState *qts = qtest_init("-machine pc -nodefaults");
++    g_autofree char *master = find_pic(qts, true);
++
++    qtest_outb(qts, 0x20, single ? 0x13 : 0x11);
++    qtest_outb(qts, 0x21, 0x40);
++    if (!single) {
++        qtest_outb(qts, 0x21, 4);
++    }
++    qtest_outb(qts, 0x21, 3); /* Auto-EOI. */
++    qtest_outb(qts, 0x21, 0xfb);
++    qtest_set_irq_in(qts, master, NULL, 2, 1);
++    qtest_set_irq_in(qts, master, NULL, 2, 0);
++    g_assert_cmphex(poll_pic(qts, 0x20), ==, single ? 0x82 : 0);
++    qtest_set_irq_in(qts, master, NULL, 2, 1);
++    g_assert_cmphex(poll_pic(qts, 0x20), ==, 0x82);
++    qtest_outb(qts, 0x20, 0x0b);
++    g_assert_cmphex(qtest_inb(qts, 0x20), ==, 0);
++    /* A held edge input must not generate a second interrupt. */
++    g_assert_cmphex(poll_pic(qts, 0x20), ==, 0);
++    qtest_set_irq_in(qts, master, NULL, 2, 0);
++    qtest_set_irq_in(qts, master, NULL, 2, 1);
++    g_assert_cmphex(poll_pic(qts, 0x20), ==, 0x82);
++    qtest_quit(qts);
++}
++
++int main(int argc, char **argv)
++{
++    g_test_init(&argc, &argv, NULL);
++    qtest_add_data_func("i8259/cascade/default", GUINT_TO_POINTER(0),
++                        test_cascade);
++    qtest_add_data_func("i8259/cascade/guest-fnm", GUINT_TO_POINTER(2),
++                        test_cascade);
++    qtest_add_func("i8259/cascade/withdrawn", test_withdrawn_cascade);
++    qtest_add_func("i8259/cascade/slave-masking", test_slave_masking);
++    qtest_add_data_func("i8259/cascade/auto-eoi", GUINT_TO_POINTER(0),
++                        test_cascade_modes);
++    qtest_add_data_func("i8259/cascade/single-controller", GUINT_TO_POINTER(1),
++                        test_cascade_modes);
++    return g_test_run();
++}
+diff --git a/tests/qtest/meson.build b/tests/qtest/meson.build
+index c4dc9cf..aa7f04c 100644
+--- a/tests/qtest/meson.build
++++ b/tests/qtest/meson.build
+@@ -57,6 +57,7 @@ qtests_filter = \
+   (get_option('default_devices') and host_os != 'windows' ? ['test-filter-redirector'] : [])
+ 
+ qtests_i386 = \
++  (config_all_devices.has_key('CONFIG_I8259') ? ['i8259-test'] : []) +                    \
+   (config_all_devices.has_key('CONFIG_SB16') ? ['sb16-test'] : []) +                    \
+   (slirp.found() ? ['pxe-test'] : []) + \
+   qtests_filter + \

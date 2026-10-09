@@ -1,0 +1,147 @@
+Subject: [PATCH 8/16] scsi: expose request buffer extent and post-load validation
+
+Allow an HBA to validate restored buffer progress after the backend
+has loaded its request. Supply buffer extents for existing backends.
+
+---
+--- a/include/hw/scsi/scsi.h
++++ b/include/hw/scsi/scsi.h
+@@ -132,6 +132,7 @@
+     void (*read_data)(SCSIRequest *req);
+     void (*write_data)(SCSIRequest *req);
+     uint8_t *(*get_buf)(SCSIRequest *req);
++    uint32_t (*get_buf_len)(SCSIRequest *req);
+ 
+     void (*save_request)(QEMUFile *f, SCSIRequest *req);
+     void (*load_request)(QEMUFile *f, SCSIRequest *req);
+@@ -151,6 +152,7 @@
+ 
+     void (*save_request)(QEMUFile *f, SCSIRequest *req);
+     void *(*load_request)(QEMUFile *f, SCSIRequest *req);
++    int (*post_load_request)(SCSIRequest *req);
+     void (*free_request)(SCSIBus *bus, void *priv);
+ 
+     /*
+@@ -234,6 +236,7 @@
+ void scsi_req_complete(SCSIRequest *req, int status);
+ void scsi_req_complete_failed(SCSIRequest *req, int host_status);
+ uint8_t *scsi_req_get_buf(SCSIRequest *req);
++uint32_t scsi_req_get_buf_len(SCSIRequest *req);
+ int scsi_req_get_sense(SCSIRequest *req, uint8_t *buf, int len);
+ void scsi_req_cancel_complete(SCSIRequest *req);
+ void scsi_req_cancel(SCSIRequest *req);
+--- a/hw/scsi/scsi-bus.c
++++ b/hw/scsi/scsi-bus.c
+@@ -790,6 +790,13 @@
+     return r->buf;
+ }
+ 
++static uint32_t scsi_target_get_buf_len(SCSIRequest *req)
++{
++    SCSITargetReq *r = DO_UPCAST(SCSITargetReq, req, req);
++
++    return r->buf_len;
++}
++
+ static uint8_t *scsi_target_alloc_buf(SCSIRequest *req, size_t len)
+ {
+     SCSITargetReq *r = DO_UPCAST(SCSITargetReq, req, req);
+@@ -812,6 +819,7 @@
+     .send_command = scsi_target_send_command,
+     .read_data    = scsi_target_read_data,
+     .get_buf      = scsi_target_get_buf,
++    .get_buf_len  = scsi_target_get_buf_len,
+     .free_req     = scsi_target_free_buf,
+ };
+ 
+@@ -936,6 +944,11 @@
+ uint8_t *scsi_req_get_buf(SCSIRequest *req)
+ {
+     return req->ops->get_buf(req);
++}
++
++uint32_t scsi_req_get_buf_len(SCSIRequest *req)
++{
++    return req->ops->get_buf_len(req);
+ }
+ 
+ static void scsi_clear_reported_luns_changed(SCSIRequest *req)
+@@ -1927,6 +1940,14 @@
+             req->ops->load_request(f, req);
+         }
+ 
++        if (bus->info->post_load_request) {
++            int ret = bus->info->post_load_request(req);
++            if (ret < 0) {
++                scsi_req_unref(req);
++                return ret;
++            }
++        }
++
+         /* Just restart it later.  */
+         scsi_req_enqueue_internal(req);
+ 
+--- a/hw/scsi/scsi-disk.c
++++ b/hw/scsi/scsi-disk.c
+@@ -657,6 +657,13 @@
+     return (uint8_t *)r->iov.iov_base;
+ }
+ 
++static uint32_t scsi_get_buf_len(SCSIRequest *req)
++{
++    SCSIDiskReq *r = DO_UPCAST(SCSIDiskReq, req, req);
++
++    return r->iov.iov_len;
++}
++
+ static int scsi_disk_emulate_vpd_page(SCSIRequest *req, uint8_t *outbuf)
+ {
+     SCSIDiskState *s = DO_UPCAST(SCSIDiskState, qdev, req->dev);
+@@ -2655,6 +2662,7 @@
+     .read_data    = scsi_disk_emulate_read_data,
+     .write_data   = scsi_disk_emulate_write_data,
+     .get_buf      = scsi_get_buf,
++    .get_buf_len  = scsi_get_buf_len,
+     .load_request = scsi_disk_emulate_load_request,
+     .save_request = scsi_disk_emulate_save_request,
+ };
+@@ -2666,6 +2674,7 @@
+     .read_data    = scsi_read_data,
+     .write_data   = scsi_write_data,
+     .get_buf      = scsi_get_buf,
++    .get_buf_len  = scsi_get_buf_len,
+     .load_request = scsi_disk_load_request,
+     .save_request = scsi_disk_save_request,
+ };
+@@ -3096,6 +3105,7 @@
+     .read_data    = scsi_read_data,
+     .write_data   = scsi_write_data,
+     .get_buf      = scsi_get_buf,
++    .get_buf_len  = scsi_get_buf_len,
+     .load_request = scsi_disk_load_request,
+     .save_request = scsi_disk_save_request,
+ };
+--- a/hw/scsi/scsi-generic.c
++++ b/hw/scsi/scsi-generic.c
+@@ -824,6 +824,13 @@
+     return r->buf;
+ }
+ 
++static uint32_t scsi_get_buf_len(SCSIRequest *req)
++{
++    SCSIGenericReq *r = DO_UPCAST(SCSIGenericReq, req, req);
++
++    return r->buflen;
++}
++
+ static void scsi_generic_command_dump(uint8_t *cmd, int len)
+ {
+     int i;
+@@ -1181,6 +1188,7 @@
+     .read_data    = scsi_read_data,
+     .write_data   = scsi_write_data,
+     .get_buf      = scsi_get_buf,
++    .get_buf_len  = scsi_get_buf_len,
+     .load_request = scsi_generic_load_request,
+     .save_request = scsi_generic_save_request,
+ };

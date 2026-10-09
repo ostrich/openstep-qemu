@@ -1,0 +1,221 @@
+Subject: [PATCH 9/16] esp: preserve deferred DMA and partial request progress during migration
+
+Save the DMA continuation and consumed-buffer offset in an optional
+subsection. Restore PCI ESP requests, selected targets and buffer
+pointers only after validating their backend extents.
+
+---
+--- a/include/hw/scsi/esp.h
++++ b/include/hw/scsi/esp.h
+@@ -69,6 +69,9 @@
+     uint8_t mig_cmdbuf[ESP_CMDFIFO_SZ];
+     uint32_t mig_cmdlen;
+ 
++    uint8_t mig_dma_cb;
++    uint32_t mig_async_len;
++    uint32_t mig_async_offset;
+     uint8_t mig_ti_cmd;
+ };
+ 
+@@ -173,6 +176,8 @@
+ uint64_t esp_reg_read(ESPState *s, uint32_t saddr);
+ void esp_reg_write(ESPState *s, uint32_t saddr, uint64_t val);
+ extern const VMStateDescription vmstate_esp;
++void *esp_load_request(QEMUFile *f, SCSIRequest *req);
++int esp_post_load_request(SCSIRequest *req);
+ int esp_pre_save(void *opaque);
+ 
+ #endif
+--- a/hw/scsi/esp.c
++++ b/hw/scsi/esp.c
+@@ -1435,6 +1435,99 @@
+     return 0;
+ }
+ 
++static int esp_dma_pre_save(void *opaque)
++{
++    ESPState *s = opaque;
++
++    if (!s->dma_cb) {
++        s->mig_dma_cb = 0;
++    } else if (s->dma_cb == handle_satn) {
++        s->mig_dma_cb = CMD_SELATN;
++    } else if (s->dma_cb == handle_s_without_atn) {
++        s->mig_dma_cb = CMD_SEL;
++    } else if (s->dma_cb == handle_satn_stop) {
++        s->mig_dma_cb = CMD_SELATNS;
++    } else if (s->dma_cb == handle_ti) {
++        s->mig_dma_cb = CMD_TI;
++    } else {
++        assert(s->dma_cb == esp_do_dma);
++        s->mig_dma_cb = CMD_TI | CMD_DMA;
++    }
++    s->mig_async_len = s->async_len;
++    s->mig_async_offset = s->async_len ?
++        s->async_buf - scsi_req_get_buf(s->current_req) : 0;
++    return 0;
++}
++
++static int esp_dma_post_load(void *opaque, int version_id)
++{
++    ESPState *s = opaque;
++
++    if (s->dma_enabled != 0 && s->dma_enabled != 1) {
++        return -EINVAL;
++    }
++    switch (s->mig_dma_cb) {
++    case 0:
++        s->dma_cb = NULL;
++        break;
++    case CMD_SELATN:
++        s->dma_cb = handle_satn;
++        break;
++    case CMD_SEL:
++        s->dma_cb = handle_s_without_atn;
++        break;
++    case CMD_SELATNS:
++        s->dma_cb = handle_satn_stop;
++        break;
++    case CMD_TI:
++        s->dma_cb = handle_ti;
++        break;
++    case CMD_TI | CMD_DMA:
++        s->dma_cb = esp_do_dma;
++        break;
++    default:
++        return -EINVAL;
++    }
++    return 0;
++}
++
++static bool esp_dma_needed(void *opaque)
++{
++    ESPState *s = opaque;
++
++    return s->dma_enabled || s->dma_cb || s->async_len;
++}
++
++static const VMStateDescription vmstate_esp_dma = {
++    .name = "esp/dma",
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .needed = esp_dma_needed,
++    .pre_save = esp_dma_pre_save,
++    .post_load = esp_dma_post_load,
++    .fields = (const VMStateField[]) {
++        VMSTATE_INT32(dma_enabled, ESPState),
++        VMSTATE_UINT8(mig_dma_cb, ESPState),
++        VMSTATE_UINT32(mig_async_len, ESPState),
++        VMSTATE_UINT32(mig_async_offset, ESPState),
++        VMSTATE_END_OF_LIST()
++    },
++};
++
++static int esp_pre_load(void *opaque)
++{
++    ESPState *s = opaque;
++
++    s->dma_enabled = 0;
++    s->dma_cb = NULL;
++    s->mig_dma_cb = 0;
++    s->mig_async_len = 0;
++    s->mig_async_offset = 0;
++    s->async_len = 0;
++    s->async_buf = NULL;
++    return 0;
++}
++
+ static int esp_post_load(void *opaque, int version_id)
+ {
+     ESPState *s = ESP(opaque);
+@@ -1462,12 +1555,21 @@
+         s->asc_mode = ESP_ASC_MODE_INI;
+     }
+ 
++    if (s->asc_mode == ESP_ASC_MODE_INI &&
++        (esp_get_phase(s) == STAT_MO || esp_get_phase(s) == STAT_CD)) {
++        s->current_dev = scsi_device_find(&s->bus, 0,
++                            s->wregs[ESP_WBUSID] & BUSID_DID, 0);
++        if (!s->current_dev) {
++            return -EINVAL;
++        }
++    }
+     s->mig_version_id = vmstate_esp.version_id;
+     return 0;
+ }
+ 
+ const VMStateDescription vmstate_esp = {
+     .name = "esp",
++    .pre_load = esp_pre_load,
+     .version_id = 8,
+     .minimum_version_id = 3,
+     .post_load = esp_post_load,
+@@ -1503,6 +1605,10 @@
+         VMSTATE_UINT8_TEST(asc_mode, ESPState, esp_is_version_8),
+         VMSTATE_END_OF_LIST()
+     },
++    .subsections = (const VMStateDescription *const[]) {
++        &vmstate_esp_dma,
++        NULL
++    },
+ };
+ 
+ static void sysbus_esp_mem_write(void *opaque, hwaddr addr,
+@@ -1576,7 +1682,7 @@
+     return val;
+ }
+ 
+-static void *esp_load_request(QEMUFile *f, SCSIRequest *req)
++void *esp_load_request(QEMUFile *f, SCSIRequest *req)
+ {
+     ESPState *s = container_of(req->bus, ESPState, bus);
+ 
+@@ -1584,6 +1690,29 @@
+     s->current_req = req;
+     s->current_dev = req->dev;
+     return s;
++}
++
++int esp_post_load_request(SCSIRequest *req)
++{
++    ESPState *s = req->hba_private;
++    uint32_t size;
++
++    if (!s->mig_async_len) {
++        return 0;
++    }
++    size = scsi_req_get_buf_len(req);
++    if (s->mig_async_offset > size ||
++        s->mig_async_len > size - s->mig_async_offset) {
++        scsi_req_unref(s->current_req);
++        s->current_req = NULL;
++        s->current_dev = NULL;
++        return -EINVAL;
++    }
++    s->async_buf = scsi_req_get_buf(req) + s->mig_async_offset;
++    s->async_len = s->mig_async_len;
++    s->mig_async_len = 0;
++    s->mig_async_offset = 0;
++    return 0;
+ }
+ 
+ static const MemoryRegionOps sysbus_esp_pdma_ops = {
+@@ -1602,6 +1731,7 @@
+     .max_lun = 7,
+ 
+     .load_request = esp_load_request,
++    .post_load_request = esp_post_load_request,
+     .transfer_data = esp_transfer_data,
+     .complete = esp_command_complete,
+     .cancel = esp_request_cancelled
+--- a/hw/scsi/esp-pci.c
++++ b/hw/scsi/esp-pci.c
+@@ -487,6 +487,8 @@
+     .max_target = ESP_MAX_DEVS,
+     .max_lun = 7,
+ 
++    .load_request = esp_load_request,
++    .post_load_request = esp_post_load_request,
+     .transfer_data = esp_transfer_data,
+     .complete = esp_command_complete,
+     .cancel = esp_request_cancelled,

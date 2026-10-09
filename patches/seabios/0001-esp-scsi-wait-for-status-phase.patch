@@ -1,0 +1,30 @@
+Subject: [PATCH 1/4] esp-scsi: wait for STATUS before completing a command
+
+DMA terminal count does not establish that the target has entered STATUS.
+An asynchronous disk write can complete DMA before its SCSI command.
+Issuing ICCS at that point leaves the BIOS waiting for MESSAGE IN.
+Wait for the status phase; this also handles responses shorter than the
+programmed transfer count.
+
+--- a/src/hw/esp-scsi.c
++++ b/src/hw/esp-scsi.c
+@@ -53,6 +53,8 @@
+ #define ESP_CMD_MSGACC   0x12
+ #define ESP_CMD_SELATN   0x42
+ 
++#define ESP_STAT_PHASE   0x07
++#define ESP_STAT_STATUS  0x03
+ #define ESP_STAT_DI      0x01
+ #define ESP_STAT_CD      0x02
+ #define ESP_STAT_MSG     0x04
+@@ -145,8 +147,8 @@
+             }
+         }
+ 
+-        /* At end of DMA TC is set again -> complete command.  */
+-        if (state == 1 && (stat & ESP_STAT_TC)) {
++        /* DMA completion can precede the target entering STATUS phase. */
++        if (state == 1 && (stat & ESP_STAT_PHASE) == ESP_STAT_STATUS) {
+             state++;
+             /* Terminate esp_scsi_dma() command */
+             outb(0, iobase + ESP_DMA_CMD);

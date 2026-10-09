@@ -1,0 +1,170 @@
+Subject: [PATCH 3/16] sb16: do not generate a completion interrupt on DSP reset
+
+DSP reset pulsed IRQ merely because auto-init was selected, even with DMA
+masked and no completed block. It then cleared the card's IRQ status, leaving
+a source-less request latched in the PIC. Reset should abort DMA and provide
+the polled 0xAA response, rather than report a completed buffer.
+
+Remove the pulse. Test 8/16-bit auto-init and single-cycle reset, pending IRQ
+clearing, command parser/IRQ acknowledgement reuse, and DREQ release. Existing
+migrated fields and reset assertion/release timing are unchanged. Physical
+SB16 confirmation is unavailable; the documented reset protocol and independent
+emulator behavior support this correction.
+
+---
+diff --git a/MAINTAINERS b/MAINTAINERS
+index 1312bbd..e53f9d0 100644
+--- a/MAINTAINERS
++++ b/MAINTAINERS
+@@ -2180,6 +2180,7 @@ F: hw/audio/
+ F: include/hw/audio/
+ F: tests/qtest/ac97-test.c
+ F: tests/qtest/es1370-test.c
++F: tests/qtest/sb16-test.c
+ F: tests/qtest/intel-hda-test.c
+ F: tests/qtest/fuzz-sb16-test.c
+ 
+diff --git a/hw/audio/sb16.c b/hw/audio/sb16.c
+index 1838d3e..71cf2cc 100644
+--- a/hw/audio/sb16.c
++++ b/hw/audio/sb16.c
+@@ -895,10 +895,6 @@ static void legacy_reset (SB16State *s)
+ static void reset (SB16State *s)
+ {
+     qemu_irq_lower (s->pic);
+-    if (s->dma_auto) {
+-        qemu_irq_raise (s->pic);
+-        qemu_irq_lower (s->pic);
+-    }
+ 
+     s->mixer_regs[0x82] = 0;
+     s->dma_auto = 0;
+diff --git a/tests/qtest/meson.build b/tests/qtest/meson.build
+index 200abf6..c4dc9cf 100644
+--- a/tests/qtest/meson.build
++++ b/tests/qtest/meson.build
+@@ -57,6 +57,7 @@ qtests_filter = \
+   (get_option('default_devices') and host_os != 'windows' ? ['test-filter-redirector'] : [])
+ 
+ qtests_i386 = \
++  (config_all_devices.has_key('CONFIG_SB16') ? ['sb16-test'] : []) +                    \
+   (slirp.found() ? ['pxe-test'] : []) + \
+   qtests_filter + \
+   (config_all_devices.has_key('CONFIG_ACPI_VMGENID') ? ['vmgenid-test'] : []) +             \
+diff --git a/tests/qtest/sb16-test.c b/tests/qtest/sb16-test.c
+new file mode 100644
+index 0000000..77c8d60
+--- /dev/null
++++ b/tests/qtest/sb16-test.c
+@@ -0,0 +1,111 @@
++/*
++ * SoundBlaster DSP reset tests.
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#include "qemu/osdep.h"
++#include "libqtest.h"
++
++static QTestState *sb16_init(void)
++{
++    QTestState *qts = qtest_init(
++        "-machine pc -nodefaults -audiodev none,id=audio "
++        "-device sb16,audiodev=audio");
++
++    qtest_outb(qts, 0x20, 0x11);
++    qtest_outb(qts, 0x21, 0x20);
++    qtest_outb(qts, 0x21, 4);
++    qtest_outb(qts, 0x21, 1);
++    qtest_outb(qts, 0x21, 0xdf);
++    /* Both DMA channels remain masked: no buffer can complete. */
++    qtest_outb(qts, 0x0a, 5);
++    qtest_outb(qts, 0xd4, 5);
++    return qts;
++}
++
++static uint8_t mixer_irq(QTestState *qts)
++{
++    qtest_outb(qts, 0x224, 0x82);
++    return qtest_inb(qts, 0x225);
++}
++
++static uint8_t poll_irq(QTestState *qts)
++{
++    qtest_outb(qts, 0x20, 0x0c);
++    return qtest_inb(qts, 0x20);
++}
++
++static void dsp_reset(QTestState *qts)
++{
++    qtest_outb(qts, 0x226, 1);
++    qtest_outb(qts, 0x226, 0);
++    g_assert_cmphex(qtest_inb(qts, 0x22e) & 0x80, ==, 0x80);
++    g_assert_cmphex(qtest_inb(qts, 0x22a), ==, 0xaa);
++    g_assert_cmphex(mixer_irq(qts), ==, 0);
++}
++
++static void reset_no_irq(const void *opaque)
++{
++    unsigned command = GPOINTER_TO_UINT(opaque);
++    QTestState *qts = sb16_init();
++
++    dsp_reset(qts);
++    qtest_outb(qts, 0x22c, command);
++    qtest_outb(qts, 0x22c, 0x10);
++    qtest_outb(qts, 0x22c, 0xff);
++    qtest_outb(qts, 0x22c, 0x0f);
++    g_assert_cmphex(qtest_inb(qts, (command & 0xf0) == 0xb0 ? 0xd0 : 8)
++                    & 0x20, ==, 0x20);
++    dsp_reset(qts);
++    g_assert_cmphex(qtest_inb(qts, (command & 0xf0) == 0xb0 ? 0xd0 : 8)
++                    & 0x20, ==, 0);
++    /* Even a pulse would latch an IRQ request in the master PIC. */
++    g_assert_cmphex(poll_irq(qts), ==, 0);
++    /* Reset must leave the command parser usable. */
++    qtest_outb(qts, 0x22c, 0xe1);
++    g_assert_cmphex(qtest_inb(qts, 0x22a), ==, 4);
++    g_assert_cmphex(qtest_inb(qts, 0x22a), ==, 5);
++    dsp_reset(qts);
++    g_assert_cmphex(poll_irq(qts), ==, 0);
++    qtest_quit(qts);
++}
++
++static void reset_pending_irq(const void *opaque)
++{
++    unsigned command = GPOINTER_TO_UINT(opaque);
++    QTestState *qts = sb16_init();
++
++    dsp_reset(qts);
++    qtest_outb(qts, 0x22c, command);
++    g_assert_cmphex(mixer_irq(qts), ==, command == 0xf2 ? 1 : 2);
++    g_assert_cmphex(poll_irq(qts), ==, 0x85);
++    dsp_reset(qts);
++    qtest_outb(qts, 0x20, 0x20);
++    g_assert_cmphex(poll_irq(qts), ==, 0);
++    /* IRQ commands must still function after reset. */
++    qtest_outb(qts, 0x22c, command);
++    g_assert_cmphex(poll_irq(qts), ==, 0x85);
++    g_assert_cmphex(mixer_irq(qts), ==, command == 0xf2 ? 1 : 2);
++    qtest_inb(qts, command == 0xf2 ? 0x22e : 0x22f);
++    g_assert_cmphex(mixer_irq(qts), ==, 0);
++    qtest_outb(qts, 0x20, 0x20);
++    g_assert_cmphex(poll_irq(qts), ==, 0);
++    qtest_quit(qts);
++}
++
++int main(int argc, char **argv)
++{
++    g_test_init(&argc, &argv, NULL);
++    qtest_add_data_func("/sb16/reset/8bit-auto", GUINT_TO_POINTER(0xc6),
++                        reset_no_irq);
++    qtest_add_data_func("/sb16/reset/16bit-auto", GUINT_TO_POINTER(0xb6),
++                        reset_no_irq);
++    qtest_add_data_func("/sb16/reset/8bit-single", GUINT_TO_POINTER(0xc0),
++                        reset_no_irq);
++    qtest_add_data_func("/sb16/reset/16bit-single", GUINT_TO_POINTER(0xb0),
++                        reset_no_irq);
++    qtest_add_data_func("/sb16/reset/8bit-pending", GUINT_TO_POINTER(0xf2),
++                        reset_pending_irq);
++    qtest_add_data_func("/sb16/reset/16bit-pending", GUINT_TO_POINTER(0xf3),
++                        reset_pending_irq);
++    return g_test_run();
++}

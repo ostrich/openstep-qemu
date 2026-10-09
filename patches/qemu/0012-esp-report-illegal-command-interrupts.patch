@@ -1,0 +1,106 @@
+Subject: [PATCH 12/16] esp: report illegal commands in the interrupt register
+
+Report invalid commands through INSTREG.ICMD rather than STATREG.IOE.
+For Am53C974, reject undefined command codes and clear the visible command
+register after rejection. Valid but unimplemented ATN3 remains accepted.
+See AMD manual sections 5.2.3.7 and 5.3.2-5.3.3.
+
+---
+--- a/hw/scsi/esp.c
++++ b/hw/scsi/esp.c
+@@ -1172,6 +1172,34 @@
+ {
+     uint8_t cmd_group = (cmd & CMD_GRP_MASK) >> 4;
+ 
++    if (s->chip_id == TCHI_AM53C974) {
++        switch (cmd & CMD_CMD) {
++        case CMD_NOP:
++        case CMD_FLUSH:
++        case CMD_RESET:
++        case CMD_BUSRESET:
++        case CMD_TI:
++        case CMD_ICCS:
++        case CMD_MSGACC:
++        case CMD_SATN:
++        case CMD_RSTATN:
++        case CMD_SEL:
++        case CMD_SELATN:
++        case CMD_SELATNS:
++        case CMD_ENSEL:
++        case CMD_DISSEL:
++        case 0x46: /* Select with ATN3: valid, not yet emulated. */
++            break;
++        case CMD_PAD:
++            if (!(cmd & CMD_DMA)) {
++                goto invalid;
++            }
++            break;
++        default:
++            goto invalid;
++        }
++    }
++
+     /* Always allow misc commands */
+     if (cmd_group == CMD_GRP_MISC) {
+         return true;
+@@ -1196,6 +1224,7 @@
+         g_assert_not_reached();
+     }
+ 
++invalid:
+     trace_esp_invalid_cmd(cmd, s->asc_mode);
+     return false;
+ }
+@@ -1357,7 +1386,10 @@
+     case ESP_CMD:
+         s->rregs[saddr] = val;
+         if (!esp_cmd_is_valid(s, s->rregs[saddr])) {
+-            s->rregs[ESP_RSTAT] |= INTR_IL;
++            s->rregs[ESP_RINTR] |= INTR_IL;
++            if (s->chip_id == TCHI_AM53C974) {
++                s->rregs[ESP_CMD] = CMD_NOP;
++            }
+             esp_raise_irq(s);
+             break;
+         }
+--- a/tests/qtest/am53c974-dma-test.c
++++ b/tests/qtest/am53c974-dma-test.c
+@@ -837,6 +837,30 @@
+     qtest_quit(q);
+ }
+ 
++static void illegal_commands(void)
++{
++    QTestState *q = start();
++    const uint8_t commands[] = {0x10, 0x07, 0x47};
++
++    for (unsigned i = 0; i < G_N_ELEMENTS(commands); i++) {
++        reg_write(q, 3, commands[i]);
++        g_assert_cmphex(reg_read(q, 4) & 0xc0, ==, 0x80);
++        g_assert_cmphex(reg_read(q, 3), ==, 0);
++        g_assert_cmphex(reg_read(q, 5), ==, 0x40);
++        g_assert_cmphex(reg_read(q, 4) & 0xc0, ==, 0);
++        g_assert_cmphex(reg_read(q, 5), ==, 0);
++    }
++    select_data(q, false, 512);
++    reg_write(q, 3, 0x45); /* Disconnected command in initiator mode. */
++    g_assert_cmphex(reg_read(q, 5) & 0x40, ==, 0x40);
++    begin_dma(q, false, false, 512, FLAT, 0);
++    reg_write(q, 3, 0x90);
++    wait_dma(q);
++    g_assert_cmphex(finish_command(q), ==, 0);
++    check_bytes(q, FLAT, fixture, 512);
++    qtest_quit(q);
++}
++
+ int main(int argc, char **argv)
+ {
+     int fd, i;
+@@ -871,6 +895,7 @@
+     }
+     qtest_add_func("/am53c974/registers", registers);
+     qtest_add_func("/am53c974/byte-lanes", byte_lanes);
++    qtest_add_func("/am53c974/illegal-commands", illegal_commands);
+     qtest_add_func("/am53c974/reserved-command-lane", reserved_command_lane);
+     qtest_add_func("/am53c974/descriptor-error", descriptor_error);
+     qtest_add_data_func("/am53c974/read/data-error", GUINT_TO_POINTER(0),

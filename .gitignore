@@ -1,0 +1,12 @@
+.sources/
+out/
+work/
+dist/
+__pycache__/
+*.py[cod]
+.venv/
+*.raw
+*.qcow2
+*.iso
+*.sock
+*.log
