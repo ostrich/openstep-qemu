@@ -75,3 +75,21 @@ new directory under `out/` to preserve old outputs. OPENSTEP_VERSION overrides
 local artifact naming; CI supplies one validated identity to firmware, binaries
 and source archives. Version-tag builds use the tag version; master builds use
 commit/run/attempt names, so successive uploads cannot mix identical filenames.
+
+## CI rebuilds and caches
+
+Documentation-only changes skip the build workflow, except `docs/bundle.md`,
+which is included in the distributed bundles. Tags and manual runs always build
+every host. Master code changes also build every host so release artifacts share
+one commit and firmware identity.
+
+Pull requests changing only a platform build script or launcher test the affected
+hosts. Linux still runs to produce the shared SeaBIOS firmware. Shared code,
+patches, packaging, tests, or workflow changes run the full matrix.
+
+CI caches ccache compiler results, Python downloads, and Homebrew downloads per
+host OS and architecture. MSYS2 also uses its built-in dependency cache. Compiler
+results are validated against compiler contents; dependencies are still installed
+and configuration, regression tests, packaging, and bundle smoke tests run each
+time. Build directories and release artifacts are not restored from caches.
+To use compiler caching locally, install ccache and set `OPENSTEP_CCACHE=1`.

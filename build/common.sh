@@ -35,6 +35,18 @@ cd "$OUT/qemu"
 configure=(--target-list="$TARGETS" --disable-werror --disable-docs
     --disable-rust --disable-gtk --disable-opengl --enable-vnc --enable-slirp
     --disable-guest-agent --prefix=/ --python="$(command -v "$PYTHON")")
+if [[ "${OPENSTEP_CCACHE:-0}" == 1 ]]; then
+    command -v ccache >/dev/null
+    export CCACHE_DIR="$ROOT/work/cache/ccache"
+    export CCACHE_BASEDIR="$ROOT"
+    export CCACHE_COMPILERCHECK=content
+    export CCACHE_MAXSIZE=500M
+    if [[ "$PLATFORM" == macos ]]; then
+        configure+=(--cc="ccache clang" --cxx="ccache clang++")
+    else
+        configure+=(--cc="ccache gcc" --cxx="ccache g++")
+    fi
+fi
 case "$PLATFORM" in
     linux) configure+=(--enable-kvm --enable-sdl --audio-drv-list=sdl) ;;
     macos) configure+=(--disable-kvm --disable-hvf --disable-sdl --enable-cocoa --audio-drv-list=coreaudio) ;;
@@ -50,5 +62,6 @@ else
 fi
 printf '%s\n' "Building $TARGETS, qemu-img and regression tests..."
 ninja -j "$JOBS"
+if [[ "${OPENSTEP_CCACHE:-0}" == 1 ]]; then ccache --show-stats; fi
 "$PYTHON" "$ROOT/tests/run-qtests.py" --build "$OUT/qemu" --output "$OUT/tests" "${TEST_ARGS[@]}"
 "$PYTHON" "$ROOT/scripts/package.py" --platform "$PLATFORM" --output "$OUT"
