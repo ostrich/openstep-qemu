@@ -20,6 +20,8 @@ permissions:
   contents: read
 env:
   OPENSTEP_CCACHE: '1'
+  HOMEBREW_NO_INSTALL_UPGRADE: '1'
+  HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: '1'
   HOMEBREW_CACHE: ${{ github.workspace }}/work/cache/homebrew
 jobs:
   scope:
@@ -44,11 +46,14 @@ jobs:
       - name: Restore compiler and download caches
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          path: work/cache/
-          key: build-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('upstream.json', 'build/**', '.github/workflows/build.yml') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            work/cache/ccache/
+            work/cache/pip/
+            work/cache/homebrew/downloads/
+          key: build-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('upstream.json', 'build/**', '.github/workflows/build.yml') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            build-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('upstream.json', 'build/**', '.github/workflows/build.yml') }}-
-            build-v1-${{ runner.os }}-${{ runner.arch }}-
+            build-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('upstream.json', 'build/**', '.github/workflows/build.yml') }}-
+            build-v2-${{ runner.os }}-${{ runner.arch }}-
       - name: Install build dependencies
         run: |
           sudo apt-get update
@@ -95,11 +100,14 @@ jobs:
       - name: Restore compiler and download caches
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          path: work/cache/
-          key: build-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('upstream.json', 'build/**', '.github/workflows/build.yml') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            work/cache/ccache/
+            work/cache/pip/
+            work/cache/homebrew/downloads/
+          key: build-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('upstream.json', 'build/**', '.github/workflows/build.yml') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            build-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('upstream.json', 'build/**', '.github/workflows/build.yml') }}-
-            build-v1-${{ runner.os }}-${{ runner.arch }}-
+            build-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('upstream.json', 'build/**', '.github/workflows/build.yml') }}-
+            build-v2-${{ runner.os }}-${{ runner.arch }}-
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: shared-firmware
@@ -116,6 +124,12 @@ jobs:
               fi
             done
             if [[ ${#missing[@]} -gt 0 ]]; then
+              # --build-from-source applies to named formulae, not automatically
+              # to transitive dependencies. Include their missing build inputs.
+              dependencies=$(brew deps --include-build --missing "${missing[@]}")
+              while IFS= read -r formula; do
+                if [[ -n "$formula" ]]; then missing+=("$formula"); fi
+              done <<< "$dependencies"
               brew install --build-from-source "${missing[@]}"
             fi
             python3 -c 'import sys; assert sys.version_info >= (3, 12)'
@@ -152,11 +166,14 @@ jobs:
       - name: Restore compiler and download caches
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          path: work/cache/
-          key: build-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('upstream.json', 'build/**', '.github/workflows/build.yml') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            work/cache/ccache/
+            work/cache/pip/
+            work/cache/homebrew/downloads/
+          key: build-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('upstream.json', 'build/**', '.github/workflows/build.yml') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            build-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('upstream.json', 'build/**', '.github/workflows/build.yml') }}-
-            build-v1-${{ runner.os }}-${{ runner.arch }}-
+            build-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('upstream.json', 'build/**', '.github/workflows/build.yml') }}-
+            build-v2-${{ runner.os }}-${{ runner.arch }}-
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: shared-firmware
