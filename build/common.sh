@@ -7,10 +7,10 @@ ARCH=$(uname -m)
 case "$ARCH" in aarch64) ARCH=arm64 ;; amd64) ARCH=x86_64 ;; esac
 OUT=$("$PYTHON" -c 'from pathlib import Path; import sys; root=Path(sys.argv[1]).resolve(); p=Path(sys.argv[2]); p=(p if p.is_absolute() else root/p).resolve(); p.relative_to(root/"out"); print(p.as_posix())' "$ROOT" "${OPENSTEP_BUILD_DIR:-out/$PLATFORM-$ARCH}")
 TARGETS=i386-softmmu
-TEST_ARGS=()
+EXTENDED_TESTS=0
 if [[ "${OPENSTEP_EXTENDED_TESTS:-0}" == 1 ]]; then
     TARGETS+=,x86_64-softmmu
-    TEST_ARGS+=(--extended)
+    EXTENDED_TESTS=1
 fi
 JOBS=${BUILD_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}
 mkdir -p "$OUT" "$ROOT/work/tmp"
@@ -63,5 +63,7 @@ fi
 printf '%s\n' "Building $TARGETS, qemu-img and regression tests..."
 ninja -j "$JOBS"
 if [[ "${OPENSTEP_CCACHE:-0}" == 1 ]]; then ccache --show-stats; fi
-"$PYTHON" "$ROOT/tests/run-qtests.py" --build "$OUT/qemu" --output "$OUT/tests" "${TEST_ARGS[@]}"
+test_command=("$PYTHON" "$ROOT/tests/run-qtests.py" --build "$OUT/qemu" --output "$OUT/tests")
+if [[ "$EXTENDED_TESTS" == 1 ]]; then test_command+=(--extended); fi
+"${test_command[@]}"
 "$PYTHON" "$ROOT/scripts/package.py" --platform "$PLATFORM" --output "$OUT"
