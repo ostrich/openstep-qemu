@@ -101,14 +101,14 @@ jobs:
           path: shared-firmware
       - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
         with:
-          msystem: MINGW64
+          msystem: UCRT64
           update: true
           install: >-
             base-devel git bison flex
-            mingw-w64-x86_64-toolchain mingw-w64-x86_64-python
-            mingw-w64-x86_64-ninja mingw-w64-x86_64-pkgconf
-            mingw-w64-x86_64-glib2 mingw-w64-x86_64-pixman
-            mingw-w64-x86_64-SDL2 mingw-w64-x86_64-libslirp
+            mingw-w64-ucrt-x86_64-toolchain mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-glib2 mingw-w64-ucrt-x86_64-pixman
+            mingw-w64-ucrt-x86_64-SDL2 mingw-w64-ucrt-x86_64-libslirp
       - name: Build identity
         run: python3 scripts/version.py --github-env
       - name: Build and test

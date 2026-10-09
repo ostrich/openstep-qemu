@@ -1,6 +1,6 @@
 # Building host bundles
 
-Use Bash on Linux/macOS and the MSYS2 MINGW64 Bash shell on Windows. Python 3.12 or newer,
+Use Bash on Linux/macOS and the MSYS2 UCRT64 Bash shell on Windows. Python 3.12 or newer,
 Git, a C/C++ compiler, Ninja, pkg-config and the host libraries below are needed.
 QEMU's configure step provisions its supported Python build environment.
 
@@ -26,14 +26,14 @@ and Mach-O dependency paths rewritten for the bundle; binaries are ad-hoc signed
 Intel and Apple Silicon build separately. Signing/notarization for publication
 is future work.
 
-Windows MSYS2 MINGW64 packages:
+Windows MSYS2 UCRT64 packages:
 
 ```sh
 pacman -S --needed base-devel git bison flex \
-  mingw-w64-x86_64-toolchain mingw-w64-x86_64-python \
-  mingw-w64-x86_64-ninja mingw-w64-x86_64-pkgconf \
-  mingw-w64-x86_64-glib2 mingw-w64-x86_64-pixman \
-  mingw-w64-x86_64-SDL2 mingw-w64-x86_64-libslirp
+  mingw-w64-ucrt-x86_64-toolchain mingw-w64-ucrt-x86_64-python \
+  mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-pkgconf \
+  mingw-w64-ucrt-x86_64-glib2 mingw-w64-ucrt-x86_64-pixman \
+  mingw-w64-ucrt-x86_64-SDL2 mingw-w64-ucrt-x86_64-libslirp
 OPENSTEP_FIRMWARE_DIR=/absolute/verified-firmware bash build/windows.sh
 ```
 
