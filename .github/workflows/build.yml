@@ -84,7 +84,7 @@ jobs:
   macos:
     needs: [scope, linux]
     if: needs.scope.outputs.macos == 'true'
-    timeout-minutes: 60
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -105,7 +105,23 @@ jobs:
           name: shared-firmware
           path: shared-firmware
       - name: Install build dependencies
-        run: brew install ccache glib pixman libslirp ninja pkg-config python
+        run: |
+          if [[ "$(uname -m)" == x86_64 ]]; then
+            # Intel bottles are unavailable for some formulae. Keep the runner's
+            # Python and installed libraries; compile only missing dependencies.
+            missing=()
+            for formula in ccache glib pixman libslirp ninja pkgconf; do
+              if ! brew list --versions "$formula" >/dev/null 2>&1; then
+                missing+=("$formula")
+              fi
+            done
+            if [[ ${#missing[@]} -gt 0 ]]; then
+              brew install --build-from-source "${missing[@]}"
+            fi
+            python3 -c 'import sys; assert sys.version_info >= (3, 12)'
+          else
+            brew install ccache glib pixman libslirp ninja pkg-config python
+          fi
       - name: Build identity
         run: python3 scripts/version.py --github-env
       - name: Build and test

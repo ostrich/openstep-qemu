@@ -21,8 +21,12 @@ def main():
     manifest = args.directory / 'BUILD.json'
     if args.command == 'record':
         manifest.write_text(json.dumps(actual, indent=2) + '\n')
-    elif json.loads(manifest.read_text()) != actual:
-        raise SystemExit('Firmware source/config/hash does not match this checkout')
+    else:
+        recorded = json.loads(manifest.read_text())
+        if recorded != actual:
+            differences = [key for key in sorted(recorded.keys() | actual.keys())
+                           if recorded.get(key) != actual.get(key)]
+            raise SystemExit('Firmware does not match this checkout: ' + ', '.join(differences))
     print('Firmware ' + args.command + ' passed')
 
 if __name__ == '__main__':
