@@ -168,7 +168,18 @@ class ReleaseTests(unittest.TestCase):
         actions = [event[0] for event in api.events]
         last_upload = max(i for i, action in enumerate(actions) if action == 'UPLOAD')
         self.assertTrue(all(i > last_upload for i, action in enumerate(actions) if action in ('PATCH', 'DELETE')))
-        self.assertEqual(actions.count('UPLOAD'), 18)
+        self.assertEqual(actions.count('UPLOAD'), 4)
+    def test_only_four_binary_assets(self):
+        manifest = self.ready()
+        self.assertEqual(len(manifest['assets']), 4)
+        for asset in manifest['assets']:
+            self.assertNotIn('-source.', asset['name'])
+            self.assertTrue(asset['name'].endswith(('.tar.gz', '.zip')))
+        api = FakeGitHub()
+        release.publish(self.candidate, VERSION, COMMIT, 'master-build', api)
+        uploads = [event[1] for event in api.events if event[0] == 'UPLOAD']
+        self.assertEqual(set(uploads), {asset['name'] for asset in manifest['assets']})
+
     def test_upload_failure_preserves_old_release(self):
         self.ready(); api = FakeGitHub(failure=True)
         with self.assertRaisesRegex(RuntimeError, 'upload failure'):

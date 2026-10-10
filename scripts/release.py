@@ -108,11 +108,11 @@ def prepare(directory, output, version, commit):
                 or identity['sources'] != sources):
             raise ValueError('Mixed version/commit/source inputs: ' + name)
     output.mkdir(parents=True)
+    # Keep source and sidecars in CI artifacts for validation. Public downloads
+    # consist of exactly one binary archive per host.
     for name, path in sorted(found.items()):
-        shutil.copy2(path, output / name)
-        shutil.copy2(path.with_name(name + '.sha256'), output / (name + '.sha256'))
-    checksums = output / ('openstep-qemu-' + version + '-checksums.sha256')
-    checksums.write_text(''.join(sha(output / name) + '  ' + name + '\n' for name in sorted(expected)))
+        if not expected[name][2]:
+            shutil.copy2(path, output / name)
     assets = [{'name': path.name, 'sha256': sha(path), 'bytes': path.stat().st_size}
               for path in sorted(output.iterdir())]
     manifest = {'schema': 1, 'version': version, 'commit': commit, 'hosts': list(HOSTS), 'assets': assets}
@@ -150,6 +150,12 @@ def publish(directory, version, commit, tag, github):
     manifest = json.loads(manifest_path.read_text())
     if manifest['commit'] != commit or manifest['version'] != version or manifest['hosts'] != list(HOSTS):
         raise ValueError('Release candidate identity mismatch')
+    required_names = {'openstep-qemu-' + version + '-' + host +
+                      ('.zip' if host.startswith('windows-') else '.tar.gz')
+                      for host in HOSTS}
+    if (len(manifest['assets']) != 4 or
+            {asset['name'] for asset in manifest['assets']} != required_names):
+        raise ValueError('Release must contain exactly four host binary archives')
     paths = []
     for asset in manifest['assets']:
         if Path(asset['name']).name != asset['name']:
@@ -158,7 +164,6 @@ def publish(directory, version, commit, tag, github):
         if path.is_symlink() or path.stat().st_size != asset['bytes'] or sha(path) != asset['sha256']:
             raise ValueError('Release candidate changed: ' + asset['name'])
         paths.append(path)
-    paths.append(manifest_path)
     rolling = tag == 'master-build'
     if not rolling and tag != 'v' + version:
         raise ValueError('Version tag does not match candidate')
@@ -202,7 +207,7 @@ def publish(directory, version, commit, tag, github):
     prerelease = rolling or '-' in version
     body = ('Build commit: `' + commit + '`.\n\n'
             'Linux x86-64, Windows x86-64, macOS arm64 and macOS x86-64 bundles, '
-            'matching source and checksums from one successful workflow run.\n\n'
+            'from one successful workflow run.\n\n'
             'Downloads contain qemu-system-i386 and qemu-img. See the bundled README '
             'and repository release notes for current guest-support limits.\n')
     github.api('PATCH', 'releases/' + str(release['id']),

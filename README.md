@@ -28,7 +28,7 @@ are available for rebuilding or reviewing individual changes.
 
 ## Download
 
-Get binaries, source and checksums from
+Get binaries from
 [Releases](https://github.com/ostrich/openstep-qemu/releases).
 Choose the archive for your **host**, not the guest:
 

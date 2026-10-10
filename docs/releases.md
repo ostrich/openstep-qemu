@@ -24,8 +24,9 @@ atomic transaction across asset uploads, tag movement and release editing;
 new candidate assets can briefly coexist with the previous published set.
 Published versioned assets are not overwritten; identical reruns are accepted.
 
-Each release includes platform bundles, matching source, per-file checksums,
-an aggregate checksum file and a release manifest. Actions use the repository's
+Each release has four binary archives: Linux x86-64, Windows x86-64, macOS arm64
+and macOS x86-64. Matching source, checksum sidecars and validation records remain
+in the workflow artifacts; the release manifest stays in the publish job. Actions use the repository's
 workflow token, not a separate personal token. Pushing master or a version tag
 now authorizes the corresponding automatic publication behavior.
 
@@ -49,8 +50,7 @@ Before a supported release:
 - Record source/configuration/compiler/tool versions, patch and binary hashes,
   test evidence, supported modes and known limits.
 
-Release assets: versioned platform bundles, matching patched source/recipes,
-checksums and build manifests. Do not place binaries in Git history. Tags should
+Release assets: four versioned platform bundles. Do not place binaries in Git history. Tags should
 identify the recipe/patch collection; upstream versions remain separately pinned.
 Individual patches retain upstream provenance and can be reviewed independently.
 Guest drivers/services and EIDE downloads belong in `openstep-drivers`.
