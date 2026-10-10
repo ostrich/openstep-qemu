@@ -45,7 +45,7 @@ prerelease updated after a successful build of every platform.
 
 Each host archive includes `qemu-system-i386`, `qemu-img`, runtime libraries,
 patched SeaBIOS, VGA firmware and launch examples. Windows users do not need
-MSYS2 to run the downloaded binaries. OPENSTEP installation media, guest disks
+MSYS2 to run the downloaded binaries. OPENSTEP installation media and guest disks
 are supplied separately. Download installable guest packages from the
 [driver releases](https://github.com/ostrich/openstep-drivers/releases/latest).
 
