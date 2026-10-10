@@ -41,6 +41,10 @@ def main():
                     for operation in ('qmp_capabilities', 'query-status', 'quit'):
                         request = {'execute': operation, 'id': operation}
                         connection.sendall((json.dumps(request) + '\n').encode())
+                        if operation == 'quit':
+                            # QEMU can close TCP before its final reply is flushed.
+                            # A clean process exit is the shutdown acknowledgement.
+                            break
                         while True:
                             line = stream.readline()
                             assert line, f'QMP disconnected during {operation}'
