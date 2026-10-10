@@ -28,7 +28,8 @@ def main():
         if r.returncode or passed < minimum:
             raise RuntimeError(f'{label}: exit={r.returncode}, passed={passed}; inspect {output / (label + ".log")}')
         results[label] = {'passed': passed, 'skipped': len(re.findall(r'^ok \d+.*# SKIP', log, re.M)), 'exit_code': r.returncode}
-        print(f'{label}: {passed} passed', flush=True)
+        skipped = results[label]['skipped']
+        print(f'{label}: {passed - skipped} passed, {skipped} skipped', flush=True)
     suites = [('i8259-test', 5), ('sb16-test', 1), ('ide-test', 1),
               ('display-vga-test', 1), ('am53c974-test', 11),
               ('am53c974-dma-test', 47), ('fuzz-virtio-scsi-test', 1)]
@@ -48,7 +49,9 @@ def main():
             run(arch + '-' + suite, command, minimum)
     env['QTEST_QEMU_BINARY'] = str(build / 'qemu-system-i386')
     qos = str(build / 'tests/qtest' / ('qos-test' + extension))
-    run('pcnet', [qos, '-p', '/i386/pc/i440FX-pcihost/pci-bus-pc/pci-bus/pcnet/pcnet-tests'], 7)
+    # The three socket-backed receive tests are compiled out under _WIN32.
+    run('pcnet', [qos, '-p', '/i386/pc/i440FX-pcihost/pci-bus-pc/pci-bus/pcnet/pcnet-tests'],
+        4 if os.name == 'nt' else 7)
     listing = subprocess.check_output([qos, '-l'], cwd=build, env=env, text=True)
     paths = [line[2:].strip() for line in listing.splitlines()
              if line.startswith('# /') and '/virtio-scsi-pci/' in line]
