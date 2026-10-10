@@ -115,24 +115,13 @@ jobs:
       - name: Install build dependencies
         run: |
           if [[ "$(uname -m)" == x86_64 ]]; then
-            # Intel bottles are unavailable for some formulae. Keep the runner's
-            # Python and installed libraries; compile only missing dependencies.
-            missing=()
-            for formula in ccache glib pixman libslirp ninja pkgconf; do
-              if ! brew list --versions "$formula" >/dev/null 2>&1; then
-                missing+=("$formula")
-              fi
+            # Use existing libraries without Homebrew's Intel upgrade chain.
+            # QEMU's Meson fallback supplies libslirp.
+            for formula in glib pixman ninja pkgconf; do
+              brew list --versions "$formula"
             done
-            if [[ ${#missing[@]} -gt 0 ]]; then
-              # --build-from-source applies to named formulae, not automatically
-              # to transitive dependencies. Include their missing build inputs.
-              dependencies=$(brew deps --include-build --missing "${missing[@]}")
-              while IFS= read -r formula; do
-                if [[ -n "$formula" ]]; then missing+=("$formula"); fi
-              done <<< "$dependencies"
-              brew install --build-from-source "${missing[@]}"
-            fi
             python3 -c 'import sys; assert sys.version_info >= (3, 12)'
+            echo 'OPENSTEP_CCACHE=0' >> "$GITHUB_ENV"
           else
             brew install ccache glib pixman libslirp ninja pkg-config python
           fi
