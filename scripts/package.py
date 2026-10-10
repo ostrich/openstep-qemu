@@ -146,6 +146,8 @@ def main():
     for program in ('qemu-system-i386', 'qemu-img'):
         target = executable_dir / (program + extension)
         shutil.copy2(output / 'qemu' / (program + extension), target)
+        if args.platform in ('linux', 'windows'):
+            subprocess.run(['strip', '--strip-debug', str(target)], check=True)
         binaries[output / 'qemu' / (program + extension)] = target
         if args.platform == 'linux':
             wrapper = '#!/bin/sh\nset -eu\nroot=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)\nexport LD_LIBRARY_PATH="$root/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\nexec "$root/libexec/' + program + '"' + (' -L "$root/share/qemu"' if program != 'qemu-img' else '') + ' "$@"\n'
@@ -174,6 +176,7 @@ def main():
                 'platform': args.platform, 'architecture': architecture,
                 'sources': {name: inputs(name) for name in pins['projects']},
                 'firmware': json.loads((output / 'firmware/BUILD.json').read_text()),
+                'debug_symbols_stripped': args.platform in ('linux', 'windows'),
                 'qtests': results, 'runtime_libraries': libraries,
                 'tools': {'python': platform.python_version(),
                           'host_os_version': platform.mac_ver()[0] if args.platform == 'macos' else platform.release(),

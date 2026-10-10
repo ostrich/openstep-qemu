@@ -73,6 +73,15 @@ jobs:
         run: bash build/linux.sh
       - name: Smoke-test packaged bundle
         run: python3 tests/smoke-bundle.py out/linux-x86_64/openstep-qemu-*-linux-x86_64
+      - name: Retain unstripped executables for debugging
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: linux-debug-binaries
+          retention-days: 7
+          compression-level: 9
+          path: |
+            out/linux-x86_64/qemu/qemu-system-i386
+            out/linux-x86_64/qemu/qemu-img
       - name: Matching source
         run: python3 scripts/source-archive.py
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -184,6 +193,15 @@ jobs:
         run: OPENSTEP_FIRMWARE_DIR="$PWD/shared-firmware" BUILD_JOBS=4 bash build/windows.sh
       - name: Smoke-test packaged bundle
         run: python3 tests/smoke-bundle.py out/windows-x86_64/openstep-qemu-*-windows-x86_64
+      - name: Retain unstripped executables for debugging
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: windows-debug-binaries
+          retention-days: 7
+          compression-level: 9
+          path: |
+            out/windows-x86_64/qemu/qemu-system-i386.exe
+            out/windows-x86_64/qemu/qemu-img.exe
       - name: Matching source
         run: python3 scripts/source-archive.py
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

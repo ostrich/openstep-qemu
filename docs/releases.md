@@ -46,7 +46,7 @@ Before a supported release:
 - Select Linux glibc/OS and macOS/Windows minimum versions. Confirm that bundled
   library loading does not depend on the builder's package-manager paths.
 - Decide Windows signing and macOS signing/notarization requirements.
-- Strip development debug data and map compiler source paths for release builds.
+- Map compiler source paths for release builds.
 - Record source/configuration/compiler/tool versions, patch and binary hashes,
   test evidence, supported modes and known limits.
 
@@ -54,3 +54,6 @@ Release assets: four versioned platform bundles. Do not place binaries in Git hi
 identify the recipe/patch collection; upstream versions remain separately pinned.
 Individual patches retain upstream provenance and can be reviewed independently.
 Guest drivers/services and EIDE downloads belong in `openstep-drivers`.
+
+Linux and Windows distribution executables have debug symbols removed. Original
+unstripped binaries remain in separate CI artifacts for seven days.
