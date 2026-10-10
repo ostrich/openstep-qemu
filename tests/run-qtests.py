@@ -32,13 +32,15 @@ def main():
     suites = [('i8259-test', 5), ('sb16-test', 1), ('ide-test', 1),
               ('display-vga-test', 1), ('am53c974-test', 11),
               ('am53c974-dma-test', 47), ('fuzz-virtio-scsi-test', 1)]
+    # qtest_get_arch parses the executable name verbatim. Windows resolves
+    # extensionless executable paths to .exe; the suffix confuses arch guards.
     for arch in (('i386', 'x86_64') if args.extended else ('i386',)):
-        env['QTEST_QEMU_BINARY'] = str(build / ('qemu-system-' + arch + extension))
+        env['QTEST_QEMU_BINARY'] = str(build / ('qemu-system-' + arch))
         for suite, minimum in suites:
             if arch == 'x86_64' and suite != 'am53c974-dma-test':
                 continue
             run(arch + '-' + suite, [str(build / 'tests/qtest' / (suite + extension))], minimum)
-    env['QTEST_QEMU_BINARY'] = str(build / ('qemu-system-i386' + extension))
+    env['QTEST_QEMU_BINARY'] = str(build / 'qemu-system-i386')
     qos = str(build / 'tests/qtest' / ('qos-test' + extension))
     run('pcnet', [qos, '-p', '/i386/pc/i440FX-pcihost/pci-bus-pc/pci-bus/pcnet/pcnet-tests'], 7)
     listing = subprocess.check_output([qos, '-l'], cwd=build, env=env, text=True)
