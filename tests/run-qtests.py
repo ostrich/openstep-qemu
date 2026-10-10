@@ -39,7 +39,13 @@ def main():
         for suite, minimum in suites:
             if arch == 'x86_64' and suite != 'am53c974-dma-test':
                 continue
-            run(arch + '-' + suite, [str(build / 'tests/qtest' / (suite + extension))], minimum)
+            command = [str(build / 'tests/qtest' / (suite + extension))]
+            if os.name == 'nt' and suite == 'am53c974-dma-test':
+                # These nine tests require file: migration, whose file channel
+                # cannot be made nonblocking on Windows. Keep DMA coverage and
+                # retain explicit TAP skips in the release manifest.
+                command += ['-x', '/' + arch + '/am53c974/migration']
+            run(arch + '-' + suite, command, minimum)
     env['QTEST_QEMU_BINARY'] = str(build / 'qemu-system-i386')
     qos = str(build / 'tests/qtest' / ('qos-test' + extension))
     run('pcnet', [qos, '-p', '/i386/pc/i440FX-pcihost/pci-bus-pc/pci-bus/pcnet/pcnet-tests'], 7)
