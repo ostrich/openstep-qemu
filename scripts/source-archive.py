@@ -10,7 +10,7 @@ import subprocess
 import tarfile
 from pathlib import Path
 from sources import ROOT, inputs, digest, verify
-from version import current_version
+from version import current_version, archive_stem
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
@@ -19,7 +19,7 @@ def main():
     host = {'Darwin': 'macos', 'Windows': 'windows', 'Linux': 'linux'}[platform.system()]
     arch = platform.machine().lower().replace('aarch64', 'arm64').replace('amd64', 'x86_64')
     version = current_version()
-    destination = (args.output or ROOT / 'dist' / ('openstep-qemu-' + version + '-' + host + '-' + arch + '-source.tar.gz')).resolve()
+    destination = (args.output or ROOT / 'dist' / (archive_stem(host + '-' + arch) + '-source.tar.gz')).resolve()
     destination.relative_to(ROOT / 'dist')
     if destination.exists():
         raise FileExistsError('Preserve existing source archive')

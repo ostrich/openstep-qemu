@@ -65,7 +65,7 @@ class ReleaseTests(unittest.TestCase):
         self.tmp.cleanup()
     def archives(self, mixed=False, x64=False):
         for index, host in enumerate(release.HOSTS):
-            root = 'openstep-qemu-' + VERSION + '-' + host
+            root = version.archive_stem(host, COMMIT)
             system, architecture = host.rsplit('-', 1)
             identity = {'distribution_version': VERSION, 'repository_commit': COMMIT,
                         'sources': self.sources}
@@ -120,6 +120,10 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(version.current_version({'GITHUB_REF': 'refs/tags/v1.2.3'}), '1.2.3')
         with self.assertRaises(ValueError):
             version.current_version({'OPENSTEP_VERSION': '../escape\nTOKEN=x'})
+    def test_archive_name(self):
+        self.assertEqual(version.archive_stem('linux-x86_64', COMMIT),
+                         'openstep-qemu-11.1.1-aaaaaaa-linux-x86_64')
+
     def test_candidate_requires_all_hosts(self):
         self.archives()
         next(self.artifacts.glob('*windows*.zip')).unlink()
@@ -151,10 +155,10 @@ class ReleaseTests(unittest.TestCase):
             release.prepare(self.artifacts, self.candidate, VERSION, COMMIT)
     def test_bundle_bios_manifest_mismatch_is_rejected(self):
         self.archives()
-        archive = self.artifacts / ('openstep-qemu-' + VERSION + '-linux-x86_64.tar.gz')
+        archive = self.artifacts / (version.archive_stem('linux-x86_64', COMMIT) + '.tar.gz')
         with tarfile.open(archive) as tar:
             files = {member.name: tar.extractfile(member).read() for member in tar if member.isfile()}
-        root = 'openstep-qemu-' + VERSION + '-linux-x86_64'
+        root = version.archive_stem('linux-x86_64', COMMIT)
         files[root + '/share/qemu/bios.bin'] = b'wrong BIOS'
         hashes = {name.removeprefix(root + '/'): digest(data) for name, data in files.items()
                   if not name.endswith('/SHA256.json')}

@@ -16,12 +16,15 @@ jobs. It independently checks all four archives, corresponding source, commit,
 patch identities, payload hashes and shared firmware before touching a release.
 Only that job has `contents: write`. The build jobs retain read-only permissions.
 
-Master asset names include commit, run and attempt identifiers. Uploads complete
+Asset names include the QEMU version and seven-character repository commit,
+for example `openstep-qemu-11.1.1-a7a8f62-linux-x86_64.tar.gz`. Full commit, run
+and attempt identities remain in build manifests. Uploads complete
 before the rolling tag/notes change and old managed assets are removed. Build
 failure, interrupted upload or a master commit superseded before promotion
 retains the previous successful downloads. The GitHub API does not offer an
 atomic transaction across asset uploads, tag movement and release editing;
-new candidate assets can briefly coexist with the previous published set.
+new candidate assets can briefly coexist with the previous published set. A
+rerun of the same commit replaces assets with the same filenames individually.
 Published versioned assets are not overwritten; identical reruns are accepted.
 
 Each release has four binary archives: Linux x86-64, Windows x86-64, macOS arm64

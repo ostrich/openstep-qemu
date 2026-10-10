@@ -12,7 +12,7 @@ import tarfile
 import zipfile
 from pathlib import Path
 from sources import ROOT, inputs, digest
-from version import current_version
+from version import current_version, archive_stem
 
 LINUX_SYSTEM = re.compile(r'^(?:ld-linux.*|lib(?:c|m|pthread|dl|rt|resolv|util|nss_[^.]+)\.so(?:\..*)?)$')
 
@@ -133,7 +133,7 @@ def main():
     pins = json.loads((ROOT / 'upstream.json').read_text())
     version = current_version()
     architecture = platform.machine().lower().replace('aarch64', 'arm64').replace('amd64', 'x86_64')
-    name = 'openstep-qemu-' + version + '-' + args.platform + '-' + architecture
+    name = archive_stem(args.platform + '-' + architecture)
     stage = output / name
     if stage.exists():
         raise FileExistsError('Preserve the previous bundle; use a new output directory')

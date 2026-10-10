@@ -32,6 +32,15 @@ def current_version(env=None):
         raise ValueError('Invalid distribution version')
     return value
 
+def archive_stem(host, commit=None):
+    """Readable download identity; full build/run identity stays in manifests."""
+    commit = os.environ.get('GITHUB_SHA') if commit is None else commit
+    if commit is not None and not re.fullmatch('[0-9a-f]{40}', commit):
+        raise ValueError('Invalid archive commit')
+    qemu = json.loads((ROOT / 'upstream.json').read_text())['projects']['qemu']['version']
+    suffix = commit[:7] if commit else 'local'
+    return f'openstep-qemu-{qemu}-{suffix}-{host}'
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--github-env', action='store_true')

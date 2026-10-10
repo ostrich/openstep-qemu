@@ -11,7 +11,7 @@ import zipfile
 from pathlib import Path
 from urllib.parse import quote
 from sources import inputs
-from version import current_version
+from version import current_version, archive_stem
 
 HOSTS = ('linux-x86_64', 'macos-arm64', 'macos-x86_64', 'windows-x86_64')
 
@@ -63,7 +63,7 @@ def prepare(directory, output, version, commit):
     common_firmware = None
     sources = {project: inputs(project) for project in ('qemu', 'seabios')}
     for host in HOSTS:
-        base = 'openstep-qemu-' + version + '-' + host
+        base = archive_stem(host, commit)
         expected[base + ('.zip' if host.startswith('windows-') else '.tar.gz')] = (base, host, False)
         expected[base + '-source.tar.gz'] = (base, host, True)
     found = {}
@@ -150,7 +150,7 @@ def publish(directory, version, commit, tag, github):
     manifest = json.loads(manifest_path.read_text())
     if manifest['commit'] != commit or manifest['version'] != version or manifest['hosts'] != list(HOSTS):
         raise ValueError('Release candidate identity mismatch')
-    required_names = {'openstep-qemu-' + version + '-' + host +
+    required_names = {archive_stem(host, commit) +
                       ('.zip' if host.startswith('windows-') else '.tar.gz')
                       for host in HOSTS}
     if (len(manifest['assets']) != 4 or
@@ -192,7 +192,10 @@ def publish(directory, version, commit, tag, github):
     for path in paths:
         if path.name in by_name:
             if not github.asset_matches(by_name[path.name], path):
-                raise ValueError('Existing release asset differs: ' + path.name)
+                if not rolling:
+                    raise ValueError('Existing release asset differs: ' + path.name)
+                github.api('DELETE', 'releases/assets/' + str(by_name[path.name]['id']))
+                github.upload(tag, path)
         else:
             github.upload(tag, path)
     # Existing successful assets remain until the entire new upload completes.
