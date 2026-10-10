@@ -3,6 +3,10 @@
 A QEMU build for running **OPENSTEP 4.2 Intel**, with device and BIOS fixes for
 its original drivers and support for our VMware SVGA and virtio guest drivers.
 
+Get the guest drivers from [openstep-drivers](https://github.com/ostrich/openstep-drivers):
+seamless mouse integration, accelerated 2D graphics, virtio storage and networking,
+and host-to-guest file transfer and terminals.
+
 OPENSTEP exercises hardware behavior that many newer guests avoid. Bugs in
 QEMU's interrupt handling, network adapter and SCSI emulation, along with
 SeaBIOS's SCSI routines, can stall boot or prevent devices from working correctly. This
@@ -42,7 +46,8 @@ prerelease updated after a successful build of every platform.
 Each host archive includes `qemu-system-i386`, `qemu-img`, runtime libraries,
 patched SeaBIOS, VGA firmware and launch examples. Windows users do not need
 MSYS2 to run the downloaded binaries. OPENSTEP installation media, guest disks
-and guest drivers are supplied separately.
+are supplied separately. Download installable guest packages from the
+[driver releases](https://github.com/ostrich/openstep-drivers/releases/latest).
 
 ## Run an installed guest
 
@@ -76,8 +81,6 @@ The network configuration forwards host port 2223 to guest SSH port 22; an SSH
 server must be installed in the guest. Shut down OPENSTEP cleanly before closing
 QEMU.
 
-Guest drivers, installable packages and guest-service configuration belong in
-[openstep-drivers](https://github.com/ostrich/openstep-drivers).
 For virtio-blk boot, follow that driver's installation instructions and add:
 
 ```text
