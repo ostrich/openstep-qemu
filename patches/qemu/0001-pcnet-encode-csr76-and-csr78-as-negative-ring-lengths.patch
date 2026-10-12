@@ -1,4 +1,4 @@
-Subject: [PATCH 1/16] pcnet: encode CSR76 and CSR78 as negative ring lengths
+Subject: [PATCH 1/17] pcnet: encode CSR76 and CSR78 as negative ring lengths
 
 CSR76 and CSR78 expose 16-bit two's-complement descriptor counts. The
 emulator stores positive counts internally, including lengths loaded from

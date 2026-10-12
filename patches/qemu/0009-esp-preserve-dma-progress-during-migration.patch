@@ -1,4 +1,4 @@
-Subject: [PATCH 9/16] esp: preserve deferred DMA and partial request progress during migration
+Subject: [PATCH 9/17] esp: preserve deferred DMA and partial request progress during migration
 
 Save the DMA continuation and consumed-buffer offset in an optional
 subsection. Restore PCI ESP requests, selected targets and buffer

@@ -1,4 +1,4 @@
-Subject: [PATCH 7/16] esp-pci: implement Am53C974 MDL DMA and channel semantics
+Subject: [PATCH 7/17] esp-pci: implement Am53C974 MDL DMA and channel semantics
 
 Implement the page-descriptor mechanism documented in AMD's 1993
 Am53C974 manual, chapter 6. Stop and report failed PCI accesses;

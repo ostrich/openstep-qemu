@@ -4,6 +4,9 @@ PCnet fixes translate negative descriptor counts and enforce stopped/startup
 state. SB16 reset no longer raises a synthetic completion interrupt. PIC cascade
 withdraws an unacknowledged slave request. VMware SVGA accepts 3840x2160 with
 sufficient VRAM while validating mode bounds and retaining default VRAM size.
+The display console allows CPU listeners such as VNC alongside GTK/SDL OpenGL
+presentation of software framebuffers. Context compatibility remains required
+for guest GL rendering and GL listeners; DMABUF requirements are unchanged.
 
 ESP/AMD SCSI changes implement actual-byte DMA accounting, MDL page descriptors,
 errors/lifecycle, migration progress validation, byte lanes, illegal commands,

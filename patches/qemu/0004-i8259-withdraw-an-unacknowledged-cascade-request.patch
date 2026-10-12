@@ -1,4 +1,4 @@
-Subject: [PATCH 4/16] i8259: withdraw an unacknowledged cascade request
+Subject: [PATCH 4/17] i8259: withdraw an unacknowledged cascade request
 
 When the slave masks a pending request behind a timer ISR, its INT output
 falls but the master retains IRQ2 in IRR. Timer EOI then acknowledges a stale

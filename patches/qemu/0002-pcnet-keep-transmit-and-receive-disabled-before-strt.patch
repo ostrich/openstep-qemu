@@ -1,4 +1,4 @@
-Subject: [PATCH 2/16] pcnet: keep transmit and receive disabled before STRT
+Subject: [PATCH 2/17] pcnet: keep transmit and receive disabled before STRT
 
 STOP incorrectly retained TXON, allowing TDMD after reinitialization to
 consume transmit descriptors before STRT. Receive also accepted frames with

@@ -21,6 +21,7 @@ video and guest-agent/terminal integration.
 | Sound Blaster 16 | Remove a spurious completion interrupt during DSP reset. |
 | 8259 interrupt controller | Withdraw stale cascade requests that can leave guest disk interrupts blocked. |
 | VMware SVGA | Allow resolutions up to 3840×2160 with sufficient video RAM and check framebuffer bounds. |
+| Display console | Allow VNC alongside GTK/SDL OpenGL presentation of software framebuffers. |
 | AMD Am53C974 / ESP SCSI | Fix DMA transfers, page descriptors, register accesses, error reporting and migration state. |
 | Virtio console | Fix disconnect handling and return pending output descriptors, supporting the guest agent and interactive terminal services. |
 | SeaBIOS | Fix ESP SCSI completion, recognize QEMU's LSI 53C810, and offer low-memory virtqueues for OPENSTEP's boot loader. |

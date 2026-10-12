@@ -1,4 +1,4 @@
-Subject: [PATCH 6/16] esp: account for short DMA transfers
+Subject: [PATCH 6/17] esp: account for short DMA transfers
 
 Let the SCSI core consume only bytes reported by its DMA callback.
 Keep legacy adapter behavior and retain deferred work across START.

@@ -14,3 +14,4 @@
 0014-esp-clear-amd-sequence-step-on-ack.patch
 0015-virtio-console-avoid-rethrottling-a-disconnected-port.patch
 0016-virtio-serial-complete-pending-output-on-port-close.patch
+0017-ui-console-allow-cpu-listeners-with-gl-presentation.patch

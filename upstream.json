@@ -10,7 +10,8 @@
       "topics": [
         "devices",
         "scsi",
-        "virtio-console"
+        "virtio-console",
+        "display"
       ]
     },
     "seabios": {

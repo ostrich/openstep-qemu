@@ -1,4 +1,4 @@
-Subject: [PATCH 15/16] virtio-console: avoid rethrottling a disconnected port
+Subject: [PATCH 15/17] virtio-console: avoid rethrottling a disconnected port
 
 A backend write can synchronously disconnect its host port. Do not reinstall
 a write watch or re-throttle the port after its disconnect handler ran.

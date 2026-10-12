@@ -1,4 +1,4 @@
-Subject: [PATCH 10/16] qtest: cover Am53C974 DMA, lifecycle, interrupts and migration
+Subject: [PATCH 10/17] qtest: cover Am53C974 DMA, lifecycle, interrupts and migration
 
 Add sector-distinct data/guard checks for flat and MDL transfers,
 channel lifecycle, errors, BLAST, migration and invalid state.

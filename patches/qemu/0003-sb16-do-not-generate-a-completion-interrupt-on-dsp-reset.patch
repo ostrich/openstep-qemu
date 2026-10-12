@@ -1,4 +1,4 @@
-Subject: [PATCH 3/16] sb16: do not generate a completion interrupt on DSP reset
+Subject: [PATCH 3/17] sb16: do not generate a completion interrupt on DSP reset
 
 DSP reset pulsed IRQ merely because auto-init was selected, even with DMA
 masked and no completed block. It then cleared the card's IRQ status, leaving

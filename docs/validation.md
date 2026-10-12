@@ -31,3 +31,10 @@ and transmit ring-wrap tests run on all platforms.
 These checks establish build, device regression and disk-free firmware startup
 coverage. They do not establish complete OPENSTEP guest compatibility on every
 host or cover every GUI, audio and guest-service configuration.
+
+Display-console checks on Linux cover exact VNC pixels, resizing and reconnects
+at 320x240, 800x600 and 1600x1200 with GTK/Wayland, SDL and GTK/Xvfb software
+OpenGL. An isolated OPENSTEP boot also matched VNC and QMP pixels at 1600x1200.
+Guest GL rendering retains its VNC restriction. These GUI checks are manual,
+using `tests/vnc-gl-framebuffer.py`; they are not part of headless CI and have
+not been run on Windows or macOS.

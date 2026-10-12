@@ -1,4 +1,4 @@
-Subject: [PATCH 11/16] esp-pci: correct byte lanes and reserved register accesses
+Subject: [PATCH 11/17] esp-pci: correct byte lanes and reserved register accesses
 
 Handle byte/word writes in their little-endian lanes and split accesses
 that cross a register boundary. Ignore reserved SCSI, command and status

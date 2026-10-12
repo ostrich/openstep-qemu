@@ -1,0 +1,34 @@
+Subject: [PATCH 17/17] ui/console: allow CPU listeners with GL presentation
+
+GTK and SDL attach a GL context even when a software adapter such as
+VMware SVGA supplies a CPU framebuffer. The unconditional context check
+then rejects VNC, although it can consume that framebuffer directly.
+
+Require context compatibility when the guest requires GL rendering or
+when the listener has GL update callbacks. Keep GL-context and DMABUF
+requirements intact. This allows accelerated local presentation and VNC
+for software framebuffers; it does not provide GPU texture readback for
+GTK/SDL guests using virgl.
+
+Validated with raw VNC pixel comparison, mode changes and reconnects
+under GTK/Wayland, GTK/X11 with Xvfb and SDL. Guest GL rendering still
+rejects VNC. OPENSTEP also boots with GTK GL and VNC together.
+
+---
+diff --git a/ui/console.c b/ui/console.c
+index a8a2a24..3eca4ee 100644
+--- a/ui/console.c
++++ b/ui/console.c
+@@ -572,7 +572,12 @@ static bool console_compatible_with(QemuConsole *con,
+ 
+     flags = con->hw_ops->get_flags ? con->hw_ops->get_flags(con->hw) : 0;
+ 
++    /* A GL context may only be used to present a software framebuffer.
++     * Such a console can still be shared with CPU display listeners (VNC,
++     * for example). Context compatibility matters for guest GL rendering.
++     */
+     if (qemu_console_has_gl(con) &&
++        ((flags & GRAPHIC_FLAGS_GL) || dcl->ops->dpy_gl_update) &&
+         !con->gl->ops->dpy_gl_ctx_is_compatible_dcl(con->gl, dcl)) {
+         error_setg(errp, "Display %s is incompatible with the GL context",
+                    dcl->ops->dpy_name);

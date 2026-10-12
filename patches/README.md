@@ -9,6 +9,7 @@ upstream commits pinned in [upstream.json](../upstream.json).
 | QEMU | 0001–0005 | PCnet networking, SB16 reset interrupts, PIC cascade handling and VMware SVGA 4K modes |
 | QEMU | 0006–0014 | ESP/AMD SCSI DMA, migration, register handling and regression tests |
 | QEMU | 0015–0016 | Virtio console disconnect handling and output completion |
+| QEMU | 0017 | VNC with GTK/SDL OpenGL presentation of software framebuffers |
 | SeaBIOS | 0001–0003 | ESP SCSI completion and LSI 53C810 discovery |
 | SeaBIOS | 0004 | Optional low-memory virtqueues for older boot loaders |
 
