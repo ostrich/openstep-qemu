@@ -11,7 +11,10 @@
         "devices",
         "scsi",
         "virtio-console",
-        "display"
+        "display",
+        "ncr710",
+        "sparc",
+        "hppa"
       ]
     },
     "seabios": {
@@ -22,6 +25,24 @@
       "topics": [
         "scsi",
         "virtio"
+      ]
+    },
+    "openbios": {
+      "url": "https://gitlab.com/qemu-project/openbios.git",
+      "revision": "e5ac46dd24e6216c36aa80462af25457e7029440",
+      "patches": "patches/openbios",
+      "topics": [
+        "sparc32"
+      ]
+    },
+    "seabios-hppa": {
+      "url": "https://github.com/hdeller/seabios-hppa.git",
+      "version": "25",
+      "revision": "6d6a72c218f6bf6b0e0b6a8bd26c5c67ba3ad2e0",
+      "patches": "patches/seabios-hppa",
+      "topics": [
+        "build",
+        "boot"
       ]
     }
   }

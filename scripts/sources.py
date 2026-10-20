@@ -35,8 +35,13 @@ def inputs(project):
     topic_names = []
     for topic in entry['topics']:
         topic_names.extend((base / 'topics' / (topic + '.series')).read_text().splitlines())
-    if topic_names != names:
+    if len(topic_names) != len(names) or set(topic_names) != set(names):
         raise ValueError(project + ': topics must partition the complete ordered series')
+    positions = {name: index for index, name in enumerate(names)}
+    for topic in entry['topics']:
+        selected = (base / 'topics' / (topic + '.series')).read_text().splitlines()
+        if selected != sorted(selected, key=positions.__getitem__):
+            raise ValueError(project + ': topic order must follow the complete series')
     if not re.fullmatch('[0-9a-f]{40}', entry['revision']):
         raise ValueError('Upstream must be pinned to a full Git commit')
     return {**entry, 'patch_sha256': patches}
@@ -83,9 +88,9 @@ def prepare(project):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=('check', 'prepare', 'verify'))
-    parser.add_argument('--project', choices=('qemu', 'seabios', 'all'), default='all')
+    parser.add_argument('--project', choices=('qemu', 'seabios', 'openbios', 'seabios-hppa', 'all'), default='all')
     args = parser.parse_args()
-    projects = ('qemu', 'seabios') if args.project == 'all' else (args.project,)
+    projects = tuple(json.loads((ROOT / 'upstream.json').read_text())['projects']) if args.project == 'all' else (args.project,)
     for project in projects:
         expected = inputs(project)
         if args.command == 'prepare':

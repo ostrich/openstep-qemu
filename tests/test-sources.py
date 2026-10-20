@@ -46,6 +46,24 @@ class SourceTests(unittest.TestCase):
         (base / 'topics/test.series').write_text('0002-test-b.patch\n')
         with self.assertRaisesRegex(ValueError, 'partition'):
             source_tools.inputs('qemu')
+    def test_interleaved_topics_follow_global_order(self):
+        base = self.inventory()
+        names = [f'{i:04d}-test-{i}.patch' for i in range(1, 4)]
+        (base / '0001-test-a.patch').unlink()
+        for i, name in enumerate(names, 1):
+            (base / name).write_text(f'Subject: [PATCH {i}/3] test: {i}\n')
+        (base / 'series').write_text('\n'.join(names) + '\n')
+        (base / 'topics/test.series').write_text(names[0] + '\n' + names[2] + '\n')
+        (base / 'topics/other.series').write_text(names[1] + '\n')
+        manifest = self.root / 'upstream.json'
+        data = json.loads(manifest.read_text())
+        data['projects']['qemu']['topics'].append('other')
+        manifest.write_text(json.dumps(data))
+        source_tools.inputs('qemu')
+        (base / 'topics/test.series').write_text(names[2] + '\n' + names[0] + '\n')
+        with self.assertRaisesRegex(ValueError, 'topic order'):
+            source_tools.inputs('qemu')
+
     def test_rejects_traversal(self):
         base = self.inventory()
         (base / 'series').write_text('../outside.patch\n')

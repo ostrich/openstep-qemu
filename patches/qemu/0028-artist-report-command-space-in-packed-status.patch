@@ -1,0 +1,65 @@
+Subject: [PATCH 28/30] artist: report command space in the packed status register
+
+The original NEXTSTEP palette loader polls the low byte of Artist's packed
+status register for more than two free entries. Returning zero forever stalls
+initialization even though this model executes commands synchronously.
+
+Return the same available space as the existing FIFO registers, with busy
+bits clear. HP's NGLE SETUP_HW polls the high byte of this register for idle.
+This retains the model's existing unqueued FIFO policy, not cycle-accurate
+FIFO occupancy or a claim about the exact hardware FIFO depth.
+
+A qtest checks idle and available-space byte lanes, the word value and its
+consistency with the separate FIFO-count register after a write.
+
+Reference: HP NGLE source, programs/Xserver/hw/hp/ngle/nglehdw.h:
+https://www.x.org/releases/X11R6.3/tars/xc-1.tar.gz
+
+diff --git a/hw/display/artist.c b/hw/display/artist.c
+index 1863dbb..9928a4c 100644
+--- a/hw/display/artist.c
++++ b/hw/display/artist.c
+@@ -1242,11 +1242,11 @@ static uint64_t artist_reg_read(void *opaque, hwaddr addr, unsigned size)
+         break;
+ 
+     case 0x100000:
+-    case FIFO_STATUS:
+     case 0x300004:
+     case 0x380000:
+         break;
+ 
++    case FIFO_STATUS:
+     case FIFO1:
+     case FIFO2:
+         /*
+diff --git a/tests/qtest/artist-test.c b/tests/qtest/artist-test.c
+index c27e09c..d91922e 100644
+--- a/tests/qtest/artist-test.c
++++ b/tests/qtest/artist-test.c
+@@ -118,6 +118,19 @@ static void unallocated_views(void)
+     qtest_quit(q);
+ }
+ 
++static void fifo_status(void)
++{
++    QTestState *q = start();
++
++    g_assert_cmphex(qtest_readb(q, REG + 0x300000), ==, 0); /* idle */
++    g_assert_cmphex(qtest_readb(q, REG + 0x300003), ==, 0x10);
++    g_assert_cmphex(qtest_readl(q, REG + 0x300000), ==, 0x10);
++    qtest_writel(q, FB, 0x12345678);
++    g_assert_cmphex(qtest_readl(q, REG + 0x300000), ==, 0x10);
++    g_assert_cmphex(qtest_readl(q, REG + 0x300008), ==, 0x10);
++    qtest_quit(q);
++}
++
+ int main(int argc, char **argv)
+ {
+     g_test_init(&argc, &argv, NULL);
+@@ -126,5 +139,6 @@ int main(int argc, char **argv)
+     qtest_add_func("/artist/direct-masks", direct_masks);
+     qtest_add_func("/artist/direct-bounds", direct_bounds);
+     qtest_add_func("/artist/unallocated-views", unallocated_views);
++    qtest_add_func("/artist/fifo-status", fifo_status);
+     return g_test_run();
+ }

@@ -1,0 +1,91 @@
+Subject: [PATCH 1/2] sparc32: honor romvec I/O mapping hints and failed reservations
+
+The V2 map interface accepts a virtual address hint. A failed fixed
+reservation must not become a wrapped mapping at -1. Allocate a free
+page-aligned range when the hint is absent or unavailable, reject invalid
+sizes and unwind a failed map. Preserve physical page offsets and mirror
+the aligned reservation when unmapping.
+
+NEXTSTEP graphical automatic startup requests a mapping with hint zero.
+Previously its failed reservation overwrote the running bootloader pages.
+
+diff --git a/arch/sparc32/lib.c b/arch/sparc32/lib.c
+index ad27c7c..5521189 100644
+--- a/arch/sparc32/lib.c
++++ b/arch/sparc32/lib.c
+@@ -192,29 +192,64 @@ ob_map_pages(void)
+     ofmem_arch_map_pages(pa, va, size, ofmem_arch_default_translation_mode(pa));
+ }
+ 
++/* Round the mapped range without overflowing the 32-bit virtual space. */
++static unsigned int obp_io_map_size(unsigned int addr, unsigned int size)
++{
++    unsigned int offset = addr & (PAGE_SIZE - 1);
++
++    if (!size || size > (unsigned int)-1 - offset - (PAGE_SIZE - 1)) {
++        return 0;
++    }
++    return (size + offset + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
++}
++
+ char *obp_dumb_mmap(char *va, int which_io, unsigned int pa,
+                     unsigned int size)
+ {
+     uint64_t mpa = ((uint64_t)which_io << 32) | (uint64_t)pa;
+-    ucell virt;
++    unsigned int offset = pa & (PAGE_SIZE - 1);
++    unsigned int mapsize = obp_io_map_size(pa, size);
++    ucell hint = pointer2cell(va);
++    ucell virt = (ucell)-1;
+ 
+-    DPRINTF("obp_dumb_mmap: virta 0x%x, phys 0x%x, size %d\n", (unsigned int)va, pa, size);
+-
+-    /* Claim virtual memory */
+-    virt = ofmem_claim_virt(pointer2cell(va), size, 0);
++    if (!mapsize) {
++        return NULL;
++    }
+ 
+-    /* Map memory */
+-    ofmem_map(mpa, virt, size, ofmem_arch_default_translation_mode(mpa));
++    /* The client supplies a hint, not a mandatory address. In particular,
++     * zero must not replace the client's live low-memory translations. */
++    if (hint && hint != (ucell)-1) {
++        hint &= ~(PAGE_SIZE - 1);
++        if (mapsize <= (ucell)-1 - hint) {
++            virt = ofmem_claim_virt(hint, mapsize, 0);
++        }
++    }
++    if (virt == (ucell)-1) {
++        virt = ofmem_claim_virt(-1, mapsize, PAGE_SIZE);
++    }
++    if (virt == (ucell)-1) {
++        return NULL;
++    }
+ 
+-    return cell2pointer(virt);
++    mpa &= ~(uint64_t)(PAGE_SIZE - 1);
++    if (ofmem_map(mpa, virt, mapsize,
++                  ofmem_arch_default_translation_mode(mpa))) {
++        ofmem_release_virt(virt, mapsize);
++        return NULL;
++    }
++    return cell2pointer(virt + offset);
+ }
+ 
+ void obp_dumb_munmap(char *va, unsigned int size)
+ {
+-    DPRINTF("obp_dumb_munmap: virta 0x%x, sz %d\n", (unsigned int)va, size);
++    unsigned int mapsize = obp_io_map_size(pointer2cell(va), size);
++    ucell virt = pointer2cell(va) & ~(PAGE_SIZE - 1);
+ 
+-    ofmem_unmap(pointer2cell(va), size);
+-    ofmem_release_virt(pointer2cell(va), size);
++    if (!mapsize || mapsize > (ucell)-1 - virt) {
++        return;
++    }
++    ofmem_unmap(virt, mapsize);
++    ofmem_release_virt(virt, mapsize);
+ }
+ 
+ char *obp_memalloc(char *va, unsigned int size, unsigned int align)

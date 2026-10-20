@@ -1,0 +1,5 @@
+0018-ncr53c710-remove-shadowing-register-definitions.patch
+0019-ncr53c710-replace-the-scripts-engine.patch
+0020-ncr53c710-wake-wait-reselect-on-sigp.patch
+0021-ncr53c710-complete-negotiation-message-handshakes.patch
+0022-qtest-cover-ncr53c710-scripts-and-messages.patch

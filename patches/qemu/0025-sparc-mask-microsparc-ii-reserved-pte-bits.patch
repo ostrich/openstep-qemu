@@ -1,0 +1,111 @@
+Subject: [PATCH 25/30] sparc: mask microSPARC-II reserved PTE bits
+
+microSPARC-II implements a 31-bit translated physical address. Its User's
+Manual rev 1.1, section 5.2.3 (printed page 68), specifies PTE[31:27] as
+reserved and read-as-zero. Preserve this on translation and MMU probes for
+the Fujitsu MB86904 and TI microSPARC-II models. Leave other CPU models'
+reference-MMU PTE widths unchanged. Retain the raw stored PTE while updating
+reference/modified bits rather than silently rewriting reserved RAM bits.
+
+NEXTSTEP's automatic graphical boot maps a framebuffer using a nonzero
+high address-space cell. Previously these ignored bits became a nonexistent
+36-bit physical address after the firmware virtual-allocation bug was fixed.
+The diskless tests/risc/microsparc-pte.S ROM matrix in the patchset
+repository exercises all three leaf levels, instruction fetch, data access
+and probes, including old-model failures and unchanged SuperSPARC controls.
+
+The SPARC32 OpenBIOS fw_cfg C driver also needs the companion bypass-access
+patch. Its synthetic device lies beyond microSPARC-II's translated physical
+range. OpenBIOS entry.S already accesses it through the bypass ASI.
+
+Hardware reference:
+https://temlib.org/pub/SparcStation/Hardware/Sparc32/microSPARC-II-UsersManual2.pdf
+
+diff --git a/target/sparc/cpu.c b/target/sparc/cpu.c
+index 13ebb12..408cf83 100644
+--- a/target/sparc/cpu.c
++++ b/target/sparc/cpu.c
+@@ -380,6 +380,8 @@ static const sparc_def_t sparc_defs[] = {
+         .mmu_cxr_mask = 0x000000ff,
+         .mmu_sfsr_mask = 0x00016fff,
+         .mmu_trcr_mask = 0x00ffffff,
++        /* microSPARC-II User's Manual 5.2.3: PTE[31:27] read zero. */
++        .mmu_pte_mask = 0x07ffffff,
+         .nwindows = 8,
+         .features = CPU_DEFAULT_FEATURES,
+     },
+@@ -419,6 +421,8 @@ static const sparc_def_t sparc_defs[] = {
+         .mmu_cxr_mask = 0x000000ff,
+         .mmu_sfsr_mask = 0x00016fff,
+         .mmu_trcr_mask = 0x00ffffff,
++        /* microSPARC-II User's Manual 5.2.3: PTE[31:27] read zero. */
++        .mmu_pte_mask = 0x07ffffff,
+         .nwindows = 8,
+         .features = CPU_DEFAULT_FEATURES,
+     },
+diff --git a/target/sparc/cpu.h b/target/sparc/cpu.h
+index 5f583ed..19a1132 100644
+--- a/target/sparc/cpu.h
++++ b/target/sparc/cpu.h
+@@ -233,6 +233,7 @@ typedef struct sparc_def_t {
+     uint32_t mmu_cxr_mask;
+     uint32_t mmu_sfsr_mask;
+     uint32_t mmu_trcr_mask;
++    uint32_t mmu_pte_mask;
+     uint32_t mxcc_version;
+     uint32_t features;
+     uint32_t nwindows;
+diff --git a/target/sparc/mmu_helper.c b/target/sparc/mmu_helper.c
+index 07ba25d..b65900c 100644
+--- a/target/sparc/mmu_helper.c
++++ b/target/sparc/mmu_helper.c
+@@ -70,6 +70,12 @@ static const int perm_table[2][8] = {
+     }
+ };
+ 
++/* A zero model mask retains the full reference-MMU PTE format. */
++static uint32_t mmu_mask_pte(CPUSPARCState *env, uint32_t pte)
++{
++    return env->def.mmu_pte_mask ? pte & env->def.mmu_pte_mask : pte;
++}
++
+ static int get_physical_address(CPUSPARCState *env, CPUTLBEntryFull *full,
+                                 int *access_index, target_ulong address,
+                                 int rw, int mmu_idx)
+@@ -206,7 +212,8 @@ static int get_physical_address(CPUSPARCState *env, CPUTLBEntryFull *full,
+ 
+     /* Even if large ptes, we map only one 4KB page in the cache to
+        avoid filling it too fast */
+-    full->phys_addr = ((hwaddr)(pde & PTE_ADDR_MASK) << 4) + page_offset;
++    full->phys_addr = ((hwaddr)(mmu_mask_pte(env, pde) & PTE_ADDR_MASK) << 4) +
++                      page_offset;
+     return error_code;
+ }
+ 
+@@ -309,7 +316,7 @@ target_ulong mmu_probe(CPUSPARCState *env, target_ulong address, int mmulev)
+         case 3: /* Reserved */
+             return 0;
+         case 2: /* L1 PTE */
+-            return pde;
++            return mmu_mask_pte(env, pde);
+         case 1: /* L2 PDE */
+             if (mmulev == 2) {
+                 return pde;
+@@ -327,7 +334,7 @@ target_ulong mmu_probe(CPUSPARCState *env, target_ulong address, int mmulev)
+             case 3: /* Reserved */
+                 return 0;
+             case 2: /* L2 PTE */
+-                return pde;
++                return mmu_mask_pte(env, pde);
+             case 1: /* L3 PDE */
+                 if (mmulev == 1) {
+                     return pde;
+@@ -346,7 +353,7 @@ target_ulong mmu_probe(CPUSPARCState *env, target_ulong address, int mmulev)
+                 case 3: /* Reserved */
+                     return 0;
+                 case 2: /* L3 PTE */
+-                    return pde;
++                    return mmu_mask_pte(env, pde);
+                 }
+             }
+         }

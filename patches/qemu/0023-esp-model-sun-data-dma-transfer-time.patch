@@ -1,0 +1,620 @@
+Subject: [PATCH 23/30] esp: model Sun DATA DMA time with device-owned lifecycle
+
+Instantaneous Sun ESP DMA completion exposes an interrupted lock-holder race
+in NEXTSTEP's original SCSA driver. Give Sun4m transfers aggregate 5 MB/s bus
+time without modifying the guest or delaying other ESP adapters by default.
+
+Own the timer per controller; gate all DMA entry points, including backend
+callbacks. Cancel deferred work on request cancellation/completion, command
+replacement and reset. Chip reset also cancels its outstanding SCSI request.
+Migrate the virtual deadline in an optional subsection, requiring matching
+configuration and rejecting inconsistent restored timer state.
+
+This is aggregate DATA IN/OUT TI timing, not a REQ/ACK or FIFO timing model.
+NCR 53C90A/B's guide documents finite asynchronous transfer rates, reset to
+disconnected state and DMA count reload. The timer and migration are QEMU
+implementation choices. See docs/risc.md in this patchset repo
+for hardware references, test evidence and remaining emulation limits.
+
+diff --git a/MAINTAINERS b/MAINTAINERS
+index 956892d..de0a0f0 100644
+--- a/MAINTAINERS
++++ b/MAINTAINERS
+@@ -2349,6 +2349,7 @@ F: tests/qtest/virtio-scsi-test.c
+ F: tests/qtest/fuzz-virtio-scsi-test.c
+ F: tests/qtest/am53c974-test.c
+ F: tests/qtest/am53c974-dma-test.c
++F: tests/qtest/esp-timing-test.c
+ F: tests/qtest/fuzz-lsi53c895a-test.c
+ F: tests/functional/x86_64/test_hotplug_scsi.py
+ T: git https://github.com/bonzini/qemu.git scsi-next
+diff --git a/hw/scsi/esp.c b/hw/scsi/esp.c
+index 4743a25..1da39b8 100644
+--- a/hw/scsi/esp.c
++++ b/hw/scsi/esp.c
+@@ -25,6 +25,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "hw/core/qdev-properties.h"
+ #include "hw/core/sysbus.h"
+ #include "migration/vmstate.h"
+ #include "hw/core/irq.h"
+@@ -113,11 +114,18 @@ void esp_dma_enable(ESPState *s, int irq, int level)
+     }
+ }
+ 
++static void esp_cancel_dma_timer(ESPState *s)
++{
++    timer_del(s->dma_timer);
++}
++
+ void esp_request_cancelled(SCSIRequest *req)
+ {
+     ESPState *s = req->hba_private;
+ 
+     if (req == s->current_req) {
++        esp_cancel_dma_timer(s);
++        s->dma_cb = NULL;
+         scsi_req_unref(s->current_req);
+         s->current_req = NULL;
+         s->current_dev = NULL;
+@@ -487,11 +495,25 @@ static void esp_dma_ti_check(ESPState *s)
+     }
+ }
+ 
++/*
++ * All DMA entry points, including asynchronous SCSI and DMA-enable callbacks,
++ * pass through this gate.  The timer models aggregate bus time; it does not
++ * attempt to expose individual REQ/ACK cycles or FIFO pipeline timing.
++ */
+ static void esp_do_dma(ESPState *s)
+ {
+     uint32_t len, cmdlen;
+     uint8_t buf[ESP_CMDFIFO_SZ];
+ 
++    if (timer_pending(s->dma_timer)) {
++        return;
++    }
++    if (s->dma_byte_ns && s->rregs[ESP_CMD] == (CMD_TI | CMD_DMA) &&
++        !s->dma_enabled) {
++        s->dma_cb = esp_do_dma;
++        return;
++    }
++
+     len = esp_get_tc(s);
+ 
+     switch (esp_get_phase(s)) {
+@@ -991,6 +1013,7 @@ void esp_command_complete(SCSIRequest *req, size_t resid)
+     ESPState *s = req->hba_private;
+     int to_device = (esp_get_phase(s) == STAT_DO);
+ 
++    esp_cancel_dma_timer(s);
+     trace_esp_command_complete();
+ 
+     /*
+@@ -1115,6 +1138,16 @@ void esp_transfer_data(SCSIRequest *req, uint32_t len)
+     }
+ }
+ 
++static void esp_dma_timer_expired(void *opaque)
++{
++    ESPState *s = opaque;
++
++    if (s->current_req && s->rregs[ESP_CMD] == (CMD_TI | CMD_DMA) &&
++        (esp_get_phase(s) == STAT_DI || esp_get_phase(s) == STAT_DO)) {
++        esp_do_dma(s);
++    }
++}
++
+ static void handle_ti(ESPState *s)
+ {
+     uint32_t dmalen;
+@@ -1140,6 +1173,10 @@ static void handle_ti(ESPState *s)
+ 
+ void esp_hard_reset(ESPState *s)
+ {
++    esp_cancel_dma_timer(s);
++    if (s->current_req) {
++        scsi_req_cancel(s->current_req);
++    }
+     memset(s->rregs, 0, ESP_REGS);
+     memset(s->wregs, 0, ESP_REGS);
+     s->tchi_written = 0;
+@@ -1163,6 +1200,8 @@ static void esp_soft_reset(ESPState *s)
+ 
+ static void esp_bus_reset(ESPState *s)
+ {
++    esp_cancel_dma_timer(s);
++    s->dma_cb = NULL;
+     bus_cold_reset(BUS(&s->bus));
+ }
+ 
+@@ -1271,6 +1310,11 @@ static void esp_run_cmd(ESPState *s)
+         break;
+     case CMD_TI:
+         trace_esp_mem_writeb_cmd_ti(cmd);
++        if (s->dma_byte_ns && s->dma && s->current_req &&
++            (esp_get_phase(s) == STAT_DI || esp_get_phase(s) == STAT_DO)) {
++            timer_mod(s->dma_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
++                      (uint64_t)esp_get_tc(s) * s->dma_byte_ns);
++        }
+         handle_ti(s);
+         break;
+     case CMD_ICCS:
+@@ -1384,6 +1428,11 @@ void esp_reg_write(ESPState *s, uint32_t saddr, uint64_t val)
+         esp_do_nodma(s);
+         break;
+     case ESP_CMD:
++        /* Replacing the command also invalidates its deferred work. */
++        esp_cancel_dma_timer(s);
++        if (s->dma_byte_ns) {
++            s->dma_cb = NULL;
++        }
+         s->rregs[saddr] = val;
+         if (!esp_cmd_is_valid(s, s->rregs[saddr])) {
+             s->rregs[ESP_RINTR] |= INTR_IL;
+@@ -1546,10 +1595,45 @@ static const VMStateDescription vmstate_esp_dma = {
+     },
+ };
+ 
++static bool esp_dma_timer_needed(void *opaque)
++{
++    ESPState *s = opaque;
++
++    return timer_pending(s->dma_timer);
++}
++
++static int esp_dma_timer_post_load(void *opaque, int version_id)
++{
++    ESPState *s = opaque;
++
++    if (!s->dma_byte_ns || !timer_pending(s->dma_timer) ||
++        s->rregs[ESP_CMD] != (CMD_TI | CMD_DMA) ||
++        (esp_get_phase(s) != STAT_DI && esp_get_phase(s) != STAT_DO)) {
++        esp_cancel_dma_timer(s);
++        return -EINVAL;
++    }
++    return 0;
++}
++
++static const VMStateDescription vmstate_esp_dma_timer = {
++    .name = "esp/transfer-timer",
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .needed = esp_dma_timer_needed,
++    .post_load = esp_dma_timer_post_load,
++    .fields = (const VMStateField[]) {
++        VMSTATE_UINT32_EQUAL(dma_byte_ns, ESPState),
++        VMSTATE_TIMER_PTR(dma_timer, ESPState),
++        VMSTATE_END_OF_LIST()
++    },
++};
++
+ static int esp_pre_load(void *opaque)
+ {
+     ESPState *s = opaque;
+ 
++    esp_cancel_dma_timer(s);
++
+     s->dma_enabled = 0;
+     s->dma_cb = NULL;
+     s->mig_dma_cb = 0;
+@@ -1639,6 +1723,7 @@ const VMStateDescription vmstate_esp = {
+     },
+     .subsections = (const VMStateDescription *const[]) {
+         &vmstate_esp_dma,
++        &vmstate_esp_dma_timer,
+         NULL
+     },
+ };
+@@ -1824,6 +1909,8 @@ static void sysbus_esp_init(Object *obj)
+     SysBusESPState *sysbus = SYSBUS_ESP(obj);
+ 
+     object_initialize_child(obj, "esp", &sysbus->esp, TYPE_ESP);
++    object_property_add_alias(obj, "dma-byte-ns", OBJECT(&sysbus->esp),
++                              "dma-byte-ns");
+ }
+ 
+ static const VMStateDescription vmstate_sysbus_esp_scsi = {
+@@ -1852,6 +1939,7 @@ static void esp_finalize(Object *obj)
+ {
+     ESPState *s = ESP(obj);
+ 
++    timer_free(s->dma_timer);
+     fifo8_destroy(&s->fifo);
+     fifo8_destroy(&s->cmdfifo);
+ }
+@@ -1860,16 +1948,22 @@ static void esp_init(Object *obj)
+ {
+     ESPState *s = ESP(obj);
+ 
++    s->dma_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, esp_dma_timer_expired, s);
+     fifo8_create(&s->fifo, ESP_FIFO_SZ);
+     fifo8_create(&s->cmdfifo, ESP_CMDFIFO_SZ);
+ }
+ 
++static const Property esp_properties[] = {
++    DEFINE_PROP_UINT32("dma-byte-ns", ESPState, dma_byte_ns, 0),
++};
++
+ static void esp_class_init(ObjectClass *klass, const void *data)
+ {
+     DeviceClass *dc = DEVICE_CLASS(klass);
+ 
+     /* internal device for sysbusesp/pciespscsi, not user-creatable */
+     dc->user_creatable = false;
++    device_class_set_props(dc, esp_properties);
+     set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);
+ }
+ 
+diff --git a/hw/sparc/sun4m.c b/hw/sparc/sun4m.c
+index 550acdf..943caba 100644
+--- a/hw/sparc/sun4m.c
++++ b/hw/sparc/sun4m.c
+@@ -307,6 +307,8 @@ static void *sparc32_dma_init(hwaddr dma_base,
+                                    OBJECT(dma), "espdma"));
+ 
+     esp = SYSBUS_ESP(object_resolve_path_component(OBJECT(espdma), "esp"));
++    /* Aggregate asynchronous bus transfer time at 5 MB/s. */
++    qdev_prop_set_uint32(DEVICE(&esp->esp), "dma-byte-ns", 200);
+ 
+     ledma = SPARC32_LEDMA_DEVICE(object_resolve_path_component(
+                                  OBJECT(dma), "ledma"));
+diff --git a/include/hw/scsi/esp.h b/include/hw/scsi/esp.h
+index 32589ea..490339f 100644
+--- a/include/hw/scsi/esp.h
++++ b/include/hw/scsi/esp.h
+@@ -4,6 +4,7 @@
+ #include "hw/scsi/scsi.h"
+ #include "hw/core/sysbus.h"
+ #include "qemu/fifo8.h"
++#include "qemu/timer.h"
+ #include "qom/object.h"
+ 
+ /* esp.c */
+@@ -47,6 +48,10 @@ struct ESPState {
+     uint32_t do_cmd;
+     uint8_t asc_mode;
+ 
++    /* Optional aggregate DATA IN/OUT DMA timing, in nanoseconds per byte. */
++    uint32_t dma_byte_ns;
++    QEMUTimer *dma_timer;
++
+     bool data_ready;
+     int dma_enabled;
+ 
+diff --git a/tests/qtest/esp-timing-test.c b/tests/qtest/esp-timing-test.c
+new file mode 100644
+index 0000000..2cbf80b
+--- /dev/null
++++ b/tests/qtest/esp-timing-test.c
+@@ -0,0 +1,315 @@
++/* Sun ESP aggregate DMA timing. SPDX-License-Identifier: GPL-2.0-or-later */
++#include "qemu/osdep.h"
++#include "libqtest.h"
++#include "qobject/qdict.h"
++
++#define ESP 0x78800000
++#define DMA 0x78400000
++#define BUFFER 0x100000
++#define TABLE 0x20000
++#define IOADDR 0xff000000
++#define NS (512 * 200)
++static char *disk;
++static uint8_t fixture[512];
++
++static void wr(QTestState *q, unsigned reg, uint8_t value)
++{
++    qtest_writeb(q, ESP + reg * 4, value);
++}
++
++static uint8_t rd(QTestState *q, unsigned reg)
++{
++    return qtest_readb(q, ESP + reg * 4);
++}
++
++static uint8_t finish(QTestState *q)
++{
++    uint8_t status;
++
++    rd(q, 5);
++    wr(q, 3, 0x11);
++    rd(q, 5);
++    status = rd(q, 2);
++    g_assert_cmphex(rd(q, 2), ==, 0);
++    wr(q, 3, 0x12);
++    rd(q, 5);
++    return status;
++}
++
++static QTestState *start(bool incoming)
++{
++    QTestState *q = qtest_initf(
++        "-machine SS-5 -m 64 -display none %s "
++        "-drive if=none,id=disk,file=%s,format=raw "
++        "-device scsi-hd,drive=disk,scsi-id=0,share-rw=on",
++        incoming ? "-incoming defer" : "", disk);
++    if (incoming) {
++        return q;
++    }
++    /* 16 MiB I/O window, first page mapped to BUFFER. */
++    qtest_writel(q, 0x10000004, TABLE >> 4);
++    qtest_writel(q, TABLE, (BUFFER >> 4) | 6);
++    qtest_writel(q, 0x10000000, 1);
++    for (int i = 0; i < 2; i++) {
++        wr(q, 3, 1);
++        wr(q, 4, 0);
++        wr(q, 2, 0x80);
++        for (int j = 0; j < 6; j++) {
++            wr(q, 2, 0);
++        }
++        wr(q, 3, 0x42);
++        g_assert_cmphex(finish(q), ==, i ? 0 : 2);
++    }
++    return q;
++}
++
++static void select_data(QTestState *q, bool write_data, uint8_t lba)
++{
++    uint8_t cdb[] = {0x28, 0, 0, 0, 0, 0, 0, 0, 1, 0};
++    cdb[0] = write_data ? 0x2a : 0x28;
++    cdb[5] = lba;
++    wr(q, 3, 1);
++    wr(q, 4, 0);
++    wr(q, 2, 0x80);
++    for (unsigned i = 0; i < sizeof(cdb); i++) {
++        wr(q, 2, cdb[i]);
++    }
++    wr(q, 3, 0x42);
++    int64_t deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
++    while (!(rd(q, 4) & 0x80)) {
++        g_assert_cmpint(g_get_monotonic_time(), <, deadline);
++        qtest_clock_step(q, 1000);
++    }
++    rd(q, 5);
++    if (write_data) {
++        qtest_memwrite(q, BUFFER, fixture, 512);
++    } else {
++        qtest_memset(q, BUFFER, 0xa5, 512);
++    }
++    qtest_writel(q, DMA + 4, IOADDR);
++    qtest_writel(q, DMA, write_data ? 0x210 : 0x310);
++    wr(q, 0, 0);
++    wr(q, 1, 2);
++    wr(q, 3, 0x90);
++}
++
++static void unchanged(QTestState *q)
++{
++    uint8_t actual[512], expected[512];
++    memset(expected, 0xa5, sizeof(expected));
++    qtest_memread(q, BUFFER, actual, sizeof(actual));
++    g_assert_cmpmem(actual, sizeof(actual), expected, sizeof(expected));
++}
++
++static void transferred(QTestState *q)
++{
++    uint8_t actual[512];
++    qtest_memread(q, BUFFER, actual, sizeof(actual));
++    g_assert_cmpmem(actual, sizeof(actual), fixture, sizeof(fixture));
++    g_assert_cmphex(finish(q), ==, 0);
++}
++
++static void timing(void)
++{
++    QTestState *q = start(false);
++    select_data(q, false, 0);
++    unchanged(q);
++    qtest_clock_step(q, NS - 1);
++    unchanged(q);
++    qtest_clock_step(q, 1);
++    transferred(q);
++    qtest_quit(q);
++}
++
++static void cancel(const void *opaque)
++{
++    unsigned kind = GPOINTER_TO_UINT(opaque);
++    QTestState *q = start(false);
++    select_data(q, false, 0);
++    switch (kind) {
++    case 0: /* Chip reset. */
++        wr(q, 3, 2);
++        break;
++    case 1: /* SCSI bus reset. */
++        wr(q, 3, 3);
++        break;
++    case 2: /* Replacement command. */
++        wr(q, 3, 0);
++        break;
++    case 3: /* Parent reset line. */
++        qtest_writel(q, DMA, 0x80);
++        break;
++    case 4:
++        qtest_qmp_assert_success(q, "{'execute':'system_reset'}");
++        break;
++    }
++    qtest_clock_step(q, NS * 2);
++    unchanged(q);
++    if (kind == 2) {
++        /* A new TI must not inherit a canceled command's deadline. */
++        wr(q, 3, 0x90);
++        qtest_clock_step(q, NS - 1);
++        unchanged(q);
++        qtest_clock_step(q, 1);
++        transferred(q);
++    }
++    qtest_quit(q);
++}
++
++static void disabled(void)
++{
++    QTestState *q = start(false);
++    select_data(q, false, 0);
++    qtest_writel(q, DMA, 0x110);
++    qtest_clock_step(q, NS * 2);
++    unchanged(q);
++    qtest_writel(q, DMA, 0x310);
++    transferred(q);
++    qtest_quit(q);
++}
++
++static void write_read(void)
++{
++    QTestState *q = start(false);
++    select_data(q, true, 1);
++    qtest_clock_step(q, NS);
++    int64_t deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
++    while (!(rd(q, 4) & 0x80)) {
++        g_assert_cmpint(g_get_monotonic_time(), <, deadline);
++        qtest_clock_step(q, 1000);
++    }
++    g_assert_cmphex(finish(q), ==, 0);
++    select_data(q, false, 1);
++    unchanged(q);
++    qtest_clock_step(q, NS);
++    transferred(q);
++    qtest_quit(q);
++}
++
++static void wait_migration(QTestState *q, bool failed)
++{
++    int64_t deadline = g_get_monotonic_time() + 10 * G_TIME_SPAN_SECOND;
++    while (true) {
++        QDict *reply = qtest_qmp_assert_success_ref(
++            q, "{'execute':'query-migrate'}");
++        const char *state = qdict_get_str(reply, "status");
++        bool done = !strcmp(state, failed ? "failed" : "completed");
++        g_assert_cmpstr(state, !=, failed ? "completed" : "failed");
++        qobject_unref(reply);
++        if (done) {
++            return;
++        }
++        g_assert_cmpint(g_get_monotonic_time(), <, deadline);
++        g_usleep(1000);
++    }
++}
++
++static void migrate(const void *opaque)
++{
++    unsigned mode = GPOINTER_TO_UINT(opaque);
++    bool write_data = mode == 1;
++    QTestState *from = start(false), *to;
++    g_autofree char *path = NULL;
++    int fd = g_file_open_tmp("esp-timing-migration-XXXXXX", &path, NULL);
++    g_assert_cmpint(fd, >=, 0);
++    close(fd);
++    g_autofree char *out = g_strdup_printf("file:%s", path);
++    select_data(from, write_data, write_data ? 1 : 0);
++    if (mode == 2) {
++        qtest_writel(from, DMA, 0x110);
++    }
++    int64_t expires = qtest_clock_step(from, NS / 2) + NS / 2;
++    if (!write_data) {
++        unchanged(from);
++    }
++    qtest_qmp_assert_success(
++        from, "{'execute':'migrate','arguments':{'uri':%s}}", out);
++    wait_migration(from, false);
++    qtest_quit(from);
++    if (mode >= 3) {
++        gchar *data;
++        gsize len;
++        const char section[] = "esp/transfer-timer";
++        g_assert_true(g_file_get_contents(path, &data, &len, NULL));
++        char *record = memmem(data, len, section, strlen(section));
++        g_assert_nonnull(record);
++        record += strlen(section) + 4; /* subsection name, then version */
++        g_assert_true(record + 12 <= data + len);
++        g_assert_cmphex((uint8_t)record[3], ==, 200);
++        if (mode == 3) {
++            memset(record, 0, 4); /* configuration mismatch */
++        } else {
++            /* Inactive timer in an active subsection. */
++            memset(record + 4, 0xff, 8);
++        }
++        g_assert_true(g_file_set_contents(path, data, len, NULL));
++        g_free(data);
++    }
++    to = start(true);
++    qtest_qmp_assert_success(to,
++        "{'execute':'migrate-incoming','arguments':{'uri':%s,"
++        "'exit-on-error':false}}", out);
++    wait_migration(to, mode >= 3);
++    if (mode >= 3) {
++        qtest_quit(to);
++        unlink(path);
++        return;
++    }
++    if (!write_data) {
++        unchanged(to);
++    }
++    qtest_clock_set(to, expires - 1);
++    if (!write_data) {
++        unchanged(to);
++    }
++    qtest_clock_step(to, 1);
++    if (mode == 2) {
++        unchanged(to);
++        qtest_writel(to, DMA, 0x310);
++    }
++    if (write_data) {
++        int64_t deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
++        while (!(rd(to, 4) & 0x80)) {
++            g_assert_cmpint(g_get_monotonic_time(), <, deadline);
++            qtest_clock_step(to, 1000);
++        }
++        g_assert_cmphex(finish(to), ==, 0);
++        select_data(to, false, 1);
++        qtest_clock_step(to, NS);
++    }
++    transferred(to);
++    qtest_quit(to);
++    unlink(path);
++}
++
++int main(int argc, char **argv)
++{
++    g_test_init(&argc, &argv, NULL);
++    int fd = g_file_open_tmp("esp-timing-disk-XXXXXX", &disk, NULL);
++    g_assert_cmpint(fd, >=, 0);
++    for (unsigned i = 0; i < sizeof(fixture); i++) {
++        fixture[i] = i * 37;
++    }
++    g_assert_cmpint(write(fd, fixture, sizeof(fixture)), ==, sizeof(fixture));
++    g_assert_cmpint(ftruncate(fd, 1024 * 1024), ==, 0);
++    close(fd);
++    qtest_add_func("/esp/timing", timing);
++    for (unsigned i = 0; i < 5; i++) {
++        g_autofree char *name = g_strdup_printf("/esp/cancel/%u", i);
++        qtest_add_data_func(name, GUINT_TO_POINTER(i), cancel);
++    }
++    qtest_add_func("/esp/dma-disabled", disabled);
++    qtest_add_func("/esp/write-read-integrity", write_read);
++    qtest_add_data_func("/esp/migration/read", GUINT_TO_POINTER(0), migrate);
++    qtest_add_data_func("/esp/migration/write", GUINT_TO_POINTER(1), migrate);
++    qtest_add_data_func("/esp/migration/dma-disabled",
++                        GUINT_TO_POINTER(2), migrate);
++    qtest_add_data_func("/esp/migration/invalid-rate",
++                        GUINT_TO_POINTER(3), migrate);
++    qtest_add_data_func("/esp/migration/invalid-timer",
++                        GUINT_TO_POINTER(4), migrate);
++    int ret = g_test_run();
++    unlink(disk);
++    g_free(disk);
++    return ret;
++}
+diff --git a/tests/qtest/meson.build b/tests/qtest/meson.build
+index ecb8a66..9323d9e 100644
+--- a/tests/qtest/meson.build
++++ b/tests/qtest/meson.build
+@@ -203,7 +203,7 @@ qtests_ppc64 = \
+ qtests_sh4 = (config_all_devices.has_key('CONFIG_ISA_TESTDEV') ? ['endianness-test'] : [])
+ qtests_sh4eb = (config_all_devices.has_key('CONFIG_ISA_TESTDEV') ? ['endianness-test'] : [])
+ 
+-qtests_sparc = ['prom-env-test', 'm48t59-test', 'boot-serial-test'] + \
++qtests_sparc = ['prom-env-test', 'm48t59-test', 'boot-serial-test', 'esp-timing-test'] + \
+   qtests_filter
+ 
+ qtests_sparc64 = \

@@ -143,7 +143,7 @@ def main():
     executable_dir.mkdir(exist_ok=True)
     binaries = {}
     extension = '.exe' if args.platform == 'windows' else ''
-    for program in ('qemu-system-i386', 'qemu-img'):
+    for program in ('qemu-system-i386', 'qemu-system-sparc', 'qemu-system-hppa', 'qemu-img'):
         target = executable_dir / (program + extension)
         shutil.copy2(output / 'qemu' / (program + extension), target)
         if args.platform in ('linux', 'windows'):
@@ -163,7 +163,16 @@ def main():
     shutil.copytree(firmware / 'keymaps', stage / 'share/qemu/keymaps')
     for filename in ('bios.bin', 'bios-256k.bin'):
         shutil.copy2(output / 'firmware/bios.bin', stage / 'share/qemu' / filename)
-    for project in ('qemu', 'seabios'):
+    for filename in ('openbios-sparc32', 'hppa-firmware.img'):
+        shutil.copy2(output / 'firmware' / filename, stage / 'share/qemu' / filename)
+    # Catch accidental checkout paths even after stripping debug sections.
+    # QEMU also embeds source locations in runtime diagnostics (__FILE__).
+    for target in list(binaries.values()) + [stage / 'share/qemu' / name for name in
+            ('bios.bin', 'openbios-sparc32', 'hppa-firmware.img')]:
+        content = target.read_bytes()
+        if any(prefix.encode() in content for prefix in (str(ROOT), ROOT.as_posix())):
+            raise RuntimeError('Private checkout path in distributed binary: ' + target.name)
+    for project in pins['projects']:
         for source in (ROOT / '.sources' / project).glob('COPYING*'):
             shutil.copy2(source, stage / 'licenses' / (project + '-' + source.name))
     shutil.copy2(ROOT / 'docs/bundle.md', stage / 'README.md')
@@ -174,16 +183,22 @@ def main():
     manifest = {'schema': 1, 'distribution_version': version,
                 'repository_commit': os.environ.get('GITHUB_SHA'),
                 'platform': args.platform, 'architecture': architecture,
-                'sources': {name: inputs(name) for name in pins['projects']},
+                'sources': {name: inputs(name)
+                            for name, entry in pins['projects'].items()
+                            if not entry.get('optional', False)},
                 'firmware': json.loads((output / 'firmware/BUILD.json').read_text()),
                 'debug_symbols_stripped': args.platform in ('linux', 'windows'),
-                'qtests': results, 'runtime_libraries': libraries,
+                'qtests': results,
+                'risc_qtests': json.loads((output / 'risc-tests/results.json').read_text()),
+                'hppa_recovery': json.loads((output / 'hppa-recovery-tests/results.json').read_text()) if args.platform == 'linux' else None,
+                'sparc_pte': json.loads((output / 'sparc-pte-tests/results.json').read_text()) if args.platform == 'linux' else None,
+                'runtime_libraries': libraries,
                 'tools': {'python': platform.python_version(),
                           'host_os_version': platform.mac_ver()[0] if args.platform == 'macos' else platform.release(),
                           'libc': list(platform.libc_ver()) if args.platform == 'linux' else None,
                           'compiler': subprocess.check_output(['cc' if args.platform != 'windows' else 'gcc', '--version'], text=True).splitlines()[0],
                           'ninja': subprocess.check_output(['ninja', '--version'], text=True).strip()},
-                'configure_args': [('--python=<host-python>' if option.startswith('--python=') else option)
+                'configure_args': [('--python=<host-python>' if option.startswith('--python=') else option.replace(ROOT.as_posix(), '<source-root>').replace(str(ROOT), '<source-root>'))
                                    for option in json.loads((output / 'qemu/configure-args.json').read_text())],
                 'guest_release_validated': False, 'dependency_license_source_audit_complete': False}
     (stage / 'BUILD.json').write_text(json.dumps(manifest, indent=2) + '\n')

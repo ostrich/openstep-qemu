@@ -1,0 +1,55 @@
+Subject: [PATCH 18/30] hw/scsi/lasi_ncr710: remove dead and shadowing defines
+From: Keith Monahan <keith@techtravels.org>
+Date: Wed,  1 Jul 2026 17:33:57 -0400
+
+Drop unused register and phase defines that duplicate the authoritative
+definitions in ncr53c710.h (LASI_SCSI_RESET, PHASE_MASK, NCR710_SCNTL1_RST
+and friends), and the leftover SCNR debug constant. None are referenced.
+
+Signed-off-by: Keith Monahan <keith@techtravels.org>
+---
+ hw/scsi/lasi_ncr710.c |  1 -
+ hw/scsi/lasi_ncr710.h | 16 ----------------
+ 2 files changed, 17 deletions(-)
+
+diff --git a/hw/scsi/lasi_ncr710.c b/hw/scsi/lasi_ncr710.c
+index 4fde2265b5..3fccda9e4e 100644
+--- a/hw/scsi/lasi_ncr710.c
++++ b/hw/scsi/lasi_ncr710.c
+@@ -24,7 +24,6 @@
+ #include "system/dma.h"
+ 
+ #define LASI_710_SVERSION    0x00082
+-#define SCNR                 0xBEEFBABE
+ #define LASI_710_HVERSION    0x3D
+ #define HPHW_FIO             5        /* Fixed I/O module */
+ 
+diff --git a/hw/scsi/lasi_ncr710.h b/hw/scsi/lasi_ncr710.h
+index 450fb7e1c3..75d3e77d20 100644
+--- a/hw/scsi/lasi_ncr710.h
++++ b/hw/scsi/lasi_ncr710.h
+@@ -22,22 +22,6 @@
+ #define TYPE_LASI_NCR710 "lasi-ncr710"
+ OBJECT_DECLARE_SIMPLE_TYPE(LasiNCR710State, LASI_NCR710)
+ 
+-#define LASI_SCSI_RESET         0x000   /* SCSI Reset Register */
+-#define LASI_SCSI_NCR710_BASE   0x100   /* NCR710 Base Register Offset */
+-
+-#define PARISC_DEVICE_ID_OFF    0x00    /* HW type, HVERSION, SVERSION */
+-#define PARISC_DEVICE_CONFIG_OFF 0x04   /* Configuration data */
+-
+-#define PHASE_MASK              7
+-#define PHASE_DO                0
+-
+-#define NCR710_SCNTL1_RST       0x08    /* SCSI Reset */
+-#define NCR710_ISTAT_RST        0x40    /* Device Reset */
+-#define NCR710_ISTAT_ABRT       0x80    /* Script Abort */
+-#define NCR710_ISTAT_CON        0x08    /* ISTAT_Connected */
+-#define NCR710_DSTAT_DFE        0x80    /* DMA FIFO Empty */
+-#define NCR710_CTEST2_DACK      0x01    /* DMA Acknowledge */
+-
+ typedef struct LasiNCR710State {
+     SysBusDevice parent_obj;
+     MemoryRegion mmio;
+-- 
+2.43.0

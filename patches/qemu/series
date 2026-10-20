@@ -15,3 +15,16 @@
 0015-virtio-console-avoid-rethrottling-a-disconnected-port.patch
 0016-virtio-serial-complete-pending-output-on-port-close.patch
 0017-ui-console-allow-cpu-listeners-with-gl-presentation.patch
+0018-ncr53c710-remove-shadowing-register-definitions.patch
+0019-ncr53c710-replace-the-scripts-engine.patch
+0020-ncr53c710-wake-wait-reselect-on-sigp.patch
+0021-ncr53c710-complete-negotiation-message-handshakes.patch
+0022-qtest-cover-ncr53c710-scripts-and-messages.patch
+0023-esp-model-sun-data-dma-transfer-time.patch
+0024-tcx-preserve-overlapping-blit-source-pixels.patch
+0025-sparc-mask-microsparc-ii-reserved-pte-bits.patch
+0026-lasi-handle-stub-audio-register-reads.patch
+0027-artist-support-byte-accesses-and-shared-image-views.patch
+0028-artist-report-command-space-in-packed-status.patch
+0029-artist-emulate-fractional-rgb-and-color-recovery.patch
+0030-hppa-emulate-recovery-counter.patch

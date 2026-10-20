@@ -1,0 +1,139 @@
+Subject: [PATCH 24/30] tcx: preserve overlapping blit source pixels
+
+Both TCX blit spaces can copy overlapping regions of their own backing
+store. memcpy gives undefined results, visible as damaged horizontal window
+redraws with NEXTSTEP. Use memmove for 8-bit pixels, 24-bit pixels and raw
+control planes. Preserve the distinction between BLIT and RBLIT.
+
+Exercise both directions, self copies, every length 1..32, offsets -31..31,
+both blit spaces and 8/24-bit display depths. The original model fails this
+regression. The corrected model also preserves native Terminal contents
+through a horizontal window-drag round trip.
+
+Related independently proposed upstream change for ordinary BLIT:
+https://www.mail-archive.com/qemu-devel@nongnu.org/msg1226322.html
+This patch additionally covers RBLIT and includes regressions.
+
+diff --git a/MAINTAINERS b/MAINTAINERS
+index de0a0f0..fdbfe04 100644
+--- a/MAINTAINERS
++++ b/MAINTAINERS
+@@ -1869,2 +1869,3 @@ F: hw/display/cg3.c
+ F: hw/display/tcx.c
++F: tests/qtest/tcx-test.c
+ F: hw/dma/sparc32_dma.c
+diff --git a/hw/display/tcx.c b/hw/display/tcx.c
+index 2c33a9c..ba16030 100644
+--- a/hw/display/tcx.c
++++ b/hw/display/tcx.c
+@@ -587,5 +587,5 @@ static void tcx_blit_writel(void *opaque, hwaddr addr,
+         } else {
+-            memcpy(&s->vram[addr], &s->vram[adsr], len);
++            memmove(&s->vram[addr], &s->vram[adsr], len);
+             if (s->depth == 24) {
+-                memcpy(&s->vram24[addr], &s->vram24[adsr], len * 4);
++                memmove(&s->vram24[addr], &s->vram24[adsr], len * 4);
+             }
+@@ -620,6 +620,6 @@ static void tcx_rblit_writel(void *opaque, hwaddr addr,
+         } else {
+-            memcpy(&s->vram[addr], &s->vram[adsr], len);
++            memmove(&s->vram[addr], &s->vram[adsr], len);
+             if (s->depth == 24) {
+-                memcpy(&s->vram24[addr], &s->vram24[adsr], len * 4);
+-                memcpy(&s->cplane[addr], &s->cplane[adsr], len * 4);
++                memmove(&s->vram24[addr], &s->vram24[adsr], len * 4);
++                memmove(&s->cplane[addr], &s->cplane[adsr], len * 4);
+             }
+diff --git a/tests/qtest/meson.build b/tests/qtest/meson.build
+index 9323d9e..2c1111e 100644
+--- a/tests/qtest/meson.build
++++ b/tests/qtest/meson.build
+@@ -208,2 +208,4 @@ qtests_sparc = ['prom-env-test', 'm48t59-test', 'boot-serial-test', 'esp-timing-
+ 
++qtests_sparc += ['tcx-test']
++
+ qtests_sparc64 = \
+diff --git a/tests/qtest/tcx-test.c b/tests/qtest/tcx-test.c
+new file mode 100644
+index 0000000..e531b2d
+--- /dev/null
++++ b/tests/qtest/tcx-test.c
+@@ -0,0 +1,78 @@
++/*
++ * TCX overlapping blit regression tests.
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#include "qemu/osdep.h"
++#include "libqtest.h"
++
++#define TCX 0x50000000ULL
++#define DFB8 (TCX + 0x00800000)
++#define DFB24 (TCX + 0x02000000)
++#define RDFB32 (TCX + 0x0a000000)
++#define BLIT (TCX + 0x06000000)
++#define RBLIT (TCX + 0x0e000000)
++
++static void overlap(const void *opaque)
++{
++    unsigned mode = GPOINTER_TO_UINT(opaque);
++    bool raw = mode & 1, depth24 = mode & 2;
++    QTestState *q = qtest_initf(
++        "-machine SS-5 -m 64 -g 1024x768x%u -display none", depth24 ? 24 : 8);
++    uint8_t pixels[128], expected[128], actual[128];
++    uint32_t rgb[128], ctl[128], rgb_expected[128], ctl_expected[128];
++    unsigned len, src, dst, i;
++    int delta;
++
++    for (len = 1; len <= 32; len++) {
++        for (delta = -31; delta <= 31; delta++) {
++            src = 48;
++            dst = src + delta;
++            for (i = 0; i < 128; i++) {
++                pixels[i] = i * 37;
++                rgb[i] = GUINT32_TO_BE(0x123400 + i);
++                ctl[i] = GUINT32_TO_BE((i & 3) << 24);
++            }
++            memcpy(expected, pixels, sizeof(pixels));
++            memcpy(rgb_expected, rgb, sizeof(rgb));
++            memcpy(ctl_expected, ctl, sizeof(ctl));
++            memmove(expected + dst, expected + src, len);
++            memmove(rgb_expected + dst, rgb_expected + src, len * 4);
++            if (raw) {
++                memmove(ctl_expected + dst, ctl_expected + src, len * 4);
++            }
++            qtest_memwrite(q, DFB8, pixels, sizeof(pixels));
++            if (depth24) {
++                qtest_memwrite(q, DFB24, rgb, sizeof(rgb));
++                qtest_memwrite(q, RDFB32, ctl, sizeof(ctl));
++            }
++            qtest_writel(q, (raw ? RBLIT : BLIT) + dst * 8, 0x30000000);
++            qtest_writel(q, (raw ? RBLIT : BLIT) + dst * 8 + 4,
++                         ((len - 1) << 24) | src);
++            qtest_memread(q, DFB8, actual, sizeof(actual));
++            g_assert_cmpmem(actual, sizeof(actual), expected, sizeof(expected));
++            if (!depth24) {
++                continue;
++            }
++            qtest_memread(q, DFB24, rgb, sizeof(rgb));
++            g_assert_cmpmem(rgb, sizeof(rgb),
++                            rgb_expected, sizeof(rgb_expected));
++            qtest_memread(q, RDFB32, ctl, sizeof(ctl));
++            g_assert_cmpmem(ctl, sizeof(ctl),
++                            ctl_expected, sizeof(ctl_expected));
++        }
++    }
++    qtest_quit(q);
++}
++
++int main(int argc, char **argv)
++{
++    g_test_init(&argc, &argv, NULL);
++    qtest_add_data_func("/tcx/8bit/blit-overlap", GUINT_TO_POINTER(0), overlap);
++    qtest_add_data_func("/tcx/8bit/raw-blit-overlap",
++                        GUINT_TO_POINTER(1), overlap);
++    qtest_add_data_func("/tcx/24bit/blit-overlap",
++                        GUINT_TO_POINTER(2), overlap);
++    qtest_add_data_func("/tcx/24bit/raw-blit-overlap",
++                        GUINT_TO_POINTER(3), overlap);
++    return g_test_run();
++}

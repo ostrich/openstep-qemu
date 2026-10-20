@@ -9,7 +9,9 @@ from version import current_version
 
 def expected():
     version = current_version()
-    return {'source': inputs('seabios'), 'config_sha256': digest(ROOT / 'configs/seabios.config'),
+    return {'sources': {p: inputs(p) for p in ('seabios', 'openbios', 'seabios-hppa')},
+            'risc_configurations': {'openbios': 'builtin-sparc32', 'seabios-hppa': 'BITS=32'},
+            'config_sha256': digest(ROOT / 'configs/seabios.config'),
             'extra_version': '-openstep-' + version}
 
 def main():
@@ -17,7 +19,8 @@ def main():
     p.add_argument('command', choices=('record', 'verify'))
     p.add_argument('directory', type=Path)
     args = p.parse_args()
-    actual = {**expected(), 'bios_sha256': digest(args.directory / 'bios.bin')}
+    actual = {**expected(), 'rom_sha256': {name: digest(args.directory / name)
+              for name in ('bios.bin', 'openbios-sparc32', 'hppa-firmware.img')}}
     manifest = args.directory / 'BUILD.json'
     if args.command == 'record':
         manifest.write_text(json.dumps(actual, indent=2) + '\n')

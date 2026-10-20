@@ -40,7 +40,7 @@ jobs:
   linux:
     needs: scope
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Restore compiler and download caches
@@ -57,7 +57,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential ccache git python3 python3-venv ninja-build pkg-config bison flex acpica-tools libglib2.0-dev libpixman-1-dev libsdl2-dev libslirp-dev libfdt-dev zlib1g-dev libzstd-dev libpng-dev libjpeg-dev
+          sudo apt-get install -y build-essential ccache git python3 python3-venv ninja-build pkg-config bison flex acpica-tools libglib2.0-dev libpixman-1-dev libsdl2-dev libslirp-dev libfdt-dev zlib1g-dev libzstd-dev libpng-dev libjpeg-dev gcc-hppa-linux-gnu gcc-sparc64-linux-gnu xsltproc fcode-utils python-is-python3
       - name: Build identity
         run: python3 scripts/version.py --github-env
       - name: Check inputs and source tooling
@@ -80,7 +80,7 @@ jobs:
           retention-days: 7
           compression-level: 9
           path: |
-            out/linux-x86_64/qemu/qemu-system-i386
+            out/linux-x86_64/qemu/qemu-system-*
             out/linux-x86_64/qemu/qemu-img
       - name: Matching source
         run: python3 scripts/source-archive.py
@@ -95,6 +95,9 @@ jobs:
           path: |
             dist/
             out/linux-x86_64/tests/
+            out/linux-x86_64/risc-tests/
+            out/linux-x86_64/hppa-recovery-tests/
+            out/linux-x86_64/sparc-pte-tests/
   macos:
     needs: [scope, linux]
     if: needs.scope.outputs.macos == 'true'
@@ -151,6 +154,7 @@ jobs:
           path: |
             dist/
             out/macos-*/tests/
+            out/macos-*/risc-tests/
   windows:
     needs: [scope, linux]
     if: needs.scope.outputs.windows == 'true'
@@ -200,7 +204,7 @@ jobs:
           retention-days: 7
           compression-level: 9
           path: |
-            out/windows-x86_64/qemu/qemu-system-i386.exe
+            out/windows-x86_64/qemu/qemu-system-*.exe
             out/windows-x86_64/qemu/qemu-img.exe
       - name: Matching source
         run: python3 scripts/source-archive.py
@@ -211,6 +215,7 @@ jobs:
           path: |
             dist/
             out/windows-x86_64/tests/
+            out/windows-x86_64/risc-tests/
 
   publish:
     if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))

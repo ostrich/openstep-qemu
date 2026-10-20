@@ -45,12 +45,12 @@ def bundle_manifest(path, root):
     if any('qemu-system-x86_64' in Path(name).name for name in files):
         raise ValueError('Download unexpectedly contains the x86_64 emulator')
     executable = '.exe' if manifest['platform'] == 'windows' else ''
-    for program in ('qemu-system-i386', 'qemu-img'):
+    for program in ('qemu-system-i386', 'qemu-system-sparc', 'qemu-system-hppa', 'qemu-img'):
         if root + '/bin/' + program + executable not in files:
             raise ValueError('Missing distributed executable: ' + program)
-    for name in ('bios.bin', 'bios-256k.bin'):
+    for name in ('bios.bin', 'bios-256k.bin', 'openbios-sparc32', 'hppa-firmware.img'):
         bios = files.get(root + '/share/qemu/' + name)
-        if bios is None or hashlib.sha256(bios).hexdigest() != manifest['firmware']['bios_sha256']:
+        if bios is None or hashlib.sha256(bios).hexdigest() != manifest['firmware']['rom_sha256']['bios.bin' if name == 'bios-256k.bin' else name]:
             raise ValueError('Bundle BIOS does not match its firmware manifest')
     return manifest
 
@@ -61,7 +61,7 @@ def prepare(directory, output, version, commit):
         raise ValueError('Use a new candidate directory outside the downloaded artifacts')
     expected = {}
     common_firmware = None
-    sources = {project: inputs(project) for project in ('qemu', 'seabios')}
+    sources = {project: inputs(project) for project in json.loads((Path(__file__).resolve().parents[1] / 'upstream.json').read_text())['projects']}
     for host in HOSTS:
         base = archive_stem(host, commit)
         expected[base + ('.zip' if host.startswith('windows-') else '.tar.gz')] = (base, host, False)
@@ -95,8 +95,18 @@ def prepare(directory, output, version, commit):
             if not identity['qtests'] or any(result['exit_code'] or result['passed'] <= result.get('skipped', 0)
                                               for result in identity['qtests'].values()):
                 raise ValueError('Bundle lacks passing regression results: ' + name)
+            if not identity.get('risc_qtests') or any(row['exit_code'] or row['passed'] <= 0
+                    for row in identity['risc_qtests'].values()):
+                raise ValueError('Bundle lacks passing RISC regressions: ' + name)
+            if platform == 'linux' and (not identity.get('hppa_recovery') or any(
+                    row.get('passed') is not True for row in identity['hppa_recovery'].values())):
+                raise ValueError('Bundle lacks passing HPPA recovery checks: ' + name)
+            if platform == 'linux' and (not identity.get('sparc_pte') or any(
+                    row.get('passed') is not True for row in identity['sparc_pte'])):
+                raise ValueError('Bundle lacks passing SPARC PTE checks: ' + name)
             firmware = identity['firmware']
-            if (firmware['source'] != sources['seabios']
+            if (firmware.get('risc_configurations') != {'openbios': 'builtin-sparc32', 'seabios-hppa': 'BITS=32'}
+                    or firmware['sources'] != {p: sources[p] for p in ('seabios', 'openbios', 'seabios-hppa')}
                     or firmware['config_sha256'] != sha(Path(__file__).resolve().parents[1] / 'configs/seabios.config')
                     or firmware['extra_version'] != '-openstep-' + version):
                 raise ValueError('Unexpected firmware inputs: ' + name)
@@ -211,7 +221,7 @@ def publish(directory, version, commit, tag, github):
     body = ('Build commit: `' + commit + '`.\n\n'
             'Linux x86-64, Windows x86-64, macOS arm64 and macOS x86-64 bundles, '
             'from one successful workflow run.\n\n'
-            'Downloads contain qemu-system-i386 and qemu-img. See the bundled README '
+            'Downloads contain i386, SPARC and HPPA emulators, qemu-img and patched firmware. See the bundled README '
             'and repository release notes for current guest-support limits.\n')
     github.api('PATCH', 'releases/' + str(release['id']),
                {'name': 'Latest master build' if rolling else 'OPENSTEP QEMU ' + tag,

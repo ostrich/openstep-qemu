@@ -1,0 +1,741 @@
+Subject: [PATCH 29/30] artist: emulate fractional RGB and Color Recovery
+From 85b8027303b5ec3e5d3da31fc19a26755c978d03 Mon Sep 17 00:00:00 2001
+From: ostrich <570911+ostrich@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 23:26:35 -0400
+
+NEXTSTEP's original HP framebuffer driver offers RGB:888/32 on Artist,
+but uses the unimplemented 0xbba0 fractional aperture. This discards its
+pixel uploads and leaves the desktop black.
+
+Convert fractional RGB transfers to the existing 8-bit image planes with
+the Artist-specific 2x16 dither matrices. Respect the IBO dithering bit,
+subword channel masks and pixel masks; handle RGB fills, lines and fonts.
+Expand fractional reads so undithered backing-store save/restore preserves
+all 256 native pixel values.
+
+Use the primary Color Recovery control bit in MISC_CTRL to select an
+edge-preserving 2x16 scanout filter, followed by independent component
+lookup tables. Sliding histograms bound scanout work per pixel. Dirty the
+following row when its filter inputs change, and redraw after palette or
+control changes. Clear recovery selection on reset. All device-visible
+state and image-plane storage already exist in VMState.
+
+Implement the NGLE source-coordinate blit trigger used by native window
+moves, retaining overlap-safe image-plane copies.
+
+Keep the existing indexed and grayscale paths. Add fractional, drawing,
+readback, recovery, palette, dirty-neighbor, reset and migration qtests,
+and register the Artist tests independently of the SCSI test selection.
+
+The filter follows HP's published functional description. Exact DAC
+rounding, boundary padding and hardware-specific filter adjustments have
+not been established with a physical Artist device. This does not add
+multiple colormap/attribute-plane selection or claim complete Artist
+hardware fidelity.
+
+References:
+https://h10032.www1.hp.com/ctg/Manual/lpv38781.pdf
+https://hparchive.com/Journals/HPJ-1995-04.pdf
+---
+ hw/display/artist.c       | 235 +++++++++++++++++++++++++++++++--
+ tests/qtest/artist-test.c | 271 ++++++++++++++++++++++++++++++++++++++
+ tests/qtest/meson.build   |   2 +
+ 3 files changed, 494 insertions(+), 14 deletions(-)
+
+diff --git a/hw/display/artist.c b/hw/display/artist.c
+index 9928a4c..be9f7df 100644
+--- a/hw/display/artist.c
++++ b/hw/display/artist.c
+@@ -130,6 +130,7 @@ typedef enum {
+     FONT_WRITE_START = 0x100aa0,
+     BLOCK_MOVE_DEST_TRIGGER = 0x100b00,
+     BLOCK_MOVE_SIZE_TRIGGER = 0x100b04,
++    BLOCK_MOVE_SOURCE_TRIGGER = 0x100b08,
+     LINE_XY = 0x100ccc,
+     PATTERN_LINE_START = 0x100ecc,
+     LINE_SIZE = 0x100e04,
+@@ -180,6 +181,7 @@ static const char *artist_reg_name(uint64_t addr)
+     REG_NAME(VRAM_SIZE_TRIGGER);
+     REG_NAME(BLOCK_MOVE_DEST_TRIGGER);
+     REG_NAME(BLOCK_MOVE_SIZE_TRIGGER);
++    REG_NAME(BLOCK_MOVE_SOURCE_TRIGGER);
+     REG_NAME(TRANSFER_DATA);
+     REG_NAME(CONTROL_PLANE);
+     REG_NAME(IMAGE_BITMAP_OP);
+@@ -269,7 +271,58 @@ static struct vram_buffer *vram_write_buffer(ARTISTState *s)
+     return artist_buffer(s, vram_write_bufidx(s));
+ }
+ 
+-static uint8_t artist_get_color(ARTISTState *s)
++/*
++ * Artist's fractional RGB aperture stores one 3:3:2 pixel per byte.
++ * Dither matrices: HP Graphics Administration Guide, HP-UX 10.20, pp. 52-54.
++ * Unlike the HCRX matrices, these are specific to the integrated Artist.
++ */
++static const int8_t artist_dither[3][2][16] = {
++    {
++        {-16, 4, -1, 11, -14, 6, -3, 9, -15, 5, -2, 10, -13, 7, -4, 8},
++        {15, -5, 0, -12, 13, -7, 2, -10, 14, -6, 1, -11, 12, -8, 3, -9}
++    }, {
++        {11, -15, 7, -3, 8, -14, 4, -2, 10, -16, 6, -4, 9, -13, 5, -1},
++        {-12, 14, -8, 2, -9, 13, -5, 1, -11, 15, -7, 3, -10, 12, -6, 0}
++    }, {
++        {-3, 9, -13, 7, -1, 11, -15, 5, -4, 8, -14, 6, -2, 10, -16, 4},
++        {2, -10, 12, -8, 0, -12, 14, -6, 3, -9, 13, -7, 1, -11, 15, -5}
++    }
++};
++
++static bool artist_fractional(uint32_t access)
++{
++    return (access >> 16) == 0xbba0;
++}
++
++static uint8_t artist_encode_rgb(uint32_t rgb, unsigned x, unsigned y,
++                                 bool dither)
++{
++    int r = (rgb >> 16) & 255, g = (rgb >> 8) & 255, b = rgb & 255;
++
++    if (!dither) {
++        return (r & 0xe0) | ((g & 0xe0) >> 3) | (b >> 6);
++    }
++    r = MIN(255, MAX(0, r + artist_dither[0][y & 1][x & 15]));
++    g = MIN(255, MAX(0, g + artist_dither[1][y & 1][x & 15]));
++    b = MIN(255, MAX(0, b + 2 * artist_dither[2][y & 1][x & 15]));
++    return (r & 0xe0) | ((g & 0xe0) >> 3) | (b >> 6);
++}
++
++static uint32_t artist_decode_rgb(uint8_t pixel)
++{
++    unsigned r = pixel >> 5, g = (pixel >> 2) & 7, b = pixel & 3;
++
++    return ((r * 255 / 7) << 16) | ((g * 255 / 7) << 8) | (b * 85);
++}
++
++static uint8_t artist_drawing_color(ARTISTState *s, uint32_t color,
++                                    unsigned x, unsigned y)
++{
++    return artist_fractional(s->dst_bm_access) ?
++           artist_encode_rgb(color, x, y, s->image_bitmap_op & 0x40) : color;
++}
++
++static uint32_t artist_get_color(ARTISTState *s)
+ {
+     if (s->image_bitmap_op & 2) {
+         return s->fg_color;
+@@ -283,8 +336,8 @@ static artist_rop_t artist_get_op(ARTISTState *s)
+     return (s->image_bitmap_op >> 8) & 0xf;
+ }
+ 
+-static void artist_rop8(ARTISTState *s, struct vram_buffer *buf,
+-                        unsigned int offset, uint8_t val)
++static void artist_rop8_mask(ARTISTState *s, struct vram_buffer *buf,
++                             unsigned int offset, uint8_t val, uint8_t mask)
+ {
+     const artist_rop_t op = artist_get_op(s);
+     uint8_t plane_mask;
+@@ -296,7 +349,7 @@ static void artist_rop8(ARTISTState *s, struct vram_buffer *buf,
+         return;
+     }
+     dst = buf->data + offset;
+-    plane_mask = s->plane_mask & 0xff;
++    plane_mask = s->plane_mask & mask;
+ 
+     switch (op) {
+     case ARTIST_ROP_CLEAR:
+@@ -323,6 +376,15 @@ static void artist_rop8(ARTISTState *s, struct vram_buffer *buf,
+         qemu_log_mask(LOG_UNIMP, "%s: unsupported rop %d\n", __func__, op);
+         break;
+     }
++    if ((s->misc_ctrl & 1) && offset + buf->width < buf->size) {
++        memory_region_set_dirty(&buf->mr, offset + buf->width, 1);
++    }
++}
++
++static void artist_rop8(ARTISTState *s, struct vram_buffer *buf,
++                        unsigned int offset, uint8_t val)
++{
++    artist_rop8_mask(s, buf, offset, val, 0xff);
+ }
+ 
+ static void artist_get_cursor_pos(ARTISTState *s, int *x, int *y)
+@@ -464,7 +526,7 @@ static void fill_window(ARTISTState *s,
+                         unsigned int width,  unsigned int height)
+ {
+     unsigned int offset;
+-    uint8_t color = artist_get_color(s);
++    uint32_t color = artist_get_color(s);
+     struct vram_buffer *buf;
+     int x, y;
+ 
+@@ -494,7 +556,8 @@ static void fill_window(ARTISTState *s,
+         offset = y * s->width;
+ 
+         for (x = startx; x < startx + width; x++) {
+-            artist_rop8(s, buf, offset + x, color);
++            artist_rop8(s, buf, offset + x,
++                        artist_drawing_color(s, color, x, y));
+         }
+     }
+     artist_invalidate_lines(buf, starty, height);
+@@ -506,7 +569,7 @@ static void draw_line(ARTISTState *s,
+                       bool update_start, int skip_pix, int max_pix)
+ {
+     struct vram_buffer *buf = &s->vram_buffer[ARTIST_BUFFER_AP];
+-    uint8_t color;
++    uint32_t color;
+     int dx, dy, t, e, x, y, incy, diago, horiz;
+     bool c1;
+ 
+@@ -584,7 +647,9 @@ static void draw_line(ARTISTState *s,
+         if (skip_pix > 0) {
+             skip_pix--;
+         } else {
+-            artist_rop8(s, buf, ofs, color);
++            artist_rop8(s, buf, ofs,
++                        artist_drawing_color(s, color,
++                                             c1 ? y : x, c1 ? x : y));
+         }
+ 
+         if (e > 0) {
+@@ -719,10 +784,13 @@ static void font_write16(ARTISTState *s, uint16_t val)
+     for (i = 0; i < 16; i++) {
+         mask = 1 << (15 - i);
+         if (val & mask) {
+-            artist_rop8(s, buf, offset + i, color);
++            artist_rop8(s, buf, offset + i,
++                        artist_drawing_color(s, color, startx + i, starty));
+         } else {
+             if (!(s->image_bitmap_op & 0x20000000)) {
+-                artist_rop8(s, buf, offset + i, s->bg_color);
++                artist_rop8(s, buf, offset + i,
++                            artist_drawing_color(s, s->bg_color,
++                                                 startx + i, starty));
+             }
+         }
+     }
+@@ -810,10 +878,16 @@ static void artist_vram_write32(ARTISTState *s, struct vram_buffer *buf,
+ 
+         if (!(s->image_bitmap_op & 0x20000000) || (vram_bitmask & mask)) {
+             if (data & mask) {
+-                artist_rop8(s, buf, offset + i, fg);
++                artist_rop8(s, buf, offset + i,
++                            artist_drawing_color(s, fg,
++                                (offset + i) % buf->width,
++                                (offset + i) / buf->width));
+             } else {
+                 if (!(s->image_bitmap_op & 0x10000002)) {
+-                    artist_rop8(s, buf, offset + i, bg);
++                    artist_rop8(s, buf, offset + i,
++                                artist_drawing_color(s, bg,
++                                    (offset + i) % buf->width,
++                                    (offset + i) / buf->width));
+                 }
+             }
+         }
+@@ -879,12 +953,49 @@ static uint32_t artist_direct_read(struct vram_buffer *buf, hwaddr addr,
+     return value;
+ }
+ 
++static void artist_fractional_write(ARTISTState *s, struct vram_buffer *buf,
++                                    hwaddr addr, uint32_t data, unsigned size)
++{
++    unsigned x = (addr >> 2) & 2047, y = addr >> 13;
++    uint32_t rgb = 0;
++    unsigned i, shift;
++    uint8_t mask = 0;
++    static const uint8_t channel_mask[] = {0, 0xe0, 0x1c, 3};
++
++    if (x >= buf->width || y >= buf->height) {
++        return;
++    }
++    if ((s->image_bitmap_op & 0x20000000) &&
++        !(s->vram_bitmask & 0x80000000U)) {
++        return;
++    }
++    /*
++     * Subword writes affect only their RGB channels. The high byte is padding,
++     * not another pixel. MMIO accesses are naturally aligned by the core.
++     */
++    for (i = 0; i < size; i++) {
++        unsigned channel = (addr + i) & 3;
++        shift = (3 - channel) * 8;
++        rgb |= ((data >> ((size - i - 1) * 8)) & 255) << shift;
++        mask |= channel_mask[channel];
++    }
++    artist_rop8_mask(s, buf, y * buf->width + x,
++                    artist_encode_rgb(rgb, x, y, s->image_bitmap_op & 0x40),
++                    mask);
++    memory_region_set_dirty(&buf->mr, y * buf->width + x, 1);
++}
++
+ static int vram_bit_write(ARTISTState *s, uint32_t pos, int posy,
+                           uint32_t data, int size)
+ {
+     struct vram_buffer *buf = vram_write_buffer(s);
+ 
+     switch (s->dst_bm_access >> 16) {
++    case 0xbba0:
++        artist_fractional_write(s, buf, pos + ((uint32_t)posy << 13),
++                                data, size);
++        pos += size;
++        break;
+     case 0x3ba0:
+     case 0xbbe0:
+         artist_vram_write4(s, buf, pos, bswap32(data));
+@@ -920,6 +1031,9 @@ static int vram_bit_write(ARTISTState *s, uint32_t pos, int posy,
+         break;
+     }
+ 
++    if (vram_write_bufidx(s) == ARTIST_BUFFER_CMAP) {
++        artist_invalidate(s);
++    }
+     if (vram_write_bufidx(s) == ARTIST_BUFFER_CURSOR1 ||
+         vram_write_bufidx(s) == ARTIST_BUFFER_CURSOR2) {
+         artist_invalidate_cursor(s);
+@@ -949,6 +1063,18 @@ static uint64_t artist_vram_read(void *opaque, hwaddr addr, unsigned size)
+         return 0;
+     }
+ 
++    if (artist_fractional(s->src_bm_access)) {
++        unsigned x = (addr >> 2) & 2047, y = addr >> 13;
++        uint32_t rgb;
++
++        if (x >= buf->width || y >= buf->height) {
++            return 0;
++        }
++        rgb = artist_decode_rgb(buf->data[y * buf->width + x]);
++        return (rgb >> ((4 - (addr & 3) - size) * 8)) &
++               (UINT32_MAX >> ((4 - size) * 8));
++    }
++
+     if (s->src_bm_access >> 16 == 0x1360) {
+         return artist_direct_read(buf, addr, size);
+     }
+@@ -1108,6 +1234,15 @@ static void artist_reg_write(void *opaque, hwaddr addr, uint64_t val,
+                    artist_get_y(s->blockmove_size));
+         break;
+ 
++    case BLOCK_MOVE_SOURCE_TRIGGER:
++        combine_write_reg(addr, val, size, &s->blockmove_source);
++        block_move(s, artist_get_x(s->blockmove_source),
++                   artist_get_y(s->blockmove_source),
++                   artist_get_x(s->vram_start), artist_get_y(s->vram_start),
++                   artist_get_x(s->blockmove_size),
++                   artist_get_y(s->blockmove_size));
++        break;
++
+     case PLANE_MASK:
+         combine_write_reg(addr, val, size, &s->plane_mask);
+         break;
+@@ -1160,6 +1295,7 @@ static void artist_reg_write(void *opaque, hwaddr addr, uint64_t val,
+ 
+     case MISC_CTRL:
+         combine_write_reg(addr, val, size, &s->misc_ctrl);
++        artist_invalidate(s);
+         break;
+ 
+     case CURSOR_POS:
+@@ -1363,6 +1499,69 @@ static bool artist_screen_enabled(ARTISTState *s)
+     return ((s->misc_video & 0x0A000000) == 0x0A000000);
+ }
+ 
++/*
++ * HP Journal, April 1995, pp. 55-57: a 2x16 edge-preserving filter.
++ * Neighbors outside +/-1 of the center component contribute the center,
++ * so the divisor stays 32 rather than depending on an adaptive sample count.
++ * Use the preceding row and a centered horizontal footprint.
++ */
++static void artist_recover_accumulate(int count[3][8], uint8_t pixel, int delta)
++{
++    count[0][pixel >> 5] += delta;
++    count[1][(pixel >> 2) & 7] += delta;
++    count[2][pixel & 3] += delta;
++}
++
++static void artist_recover_line(ARTISTState *s, uint32_t *dest,
++                                const uint8_t *src)
++{
++    const uint8_t *fb = s->vram_buffer[ARTIST_BUFFER_AP].data;
++    const uint32_t *cmap = (const uint32_t *)
++        (s->vram_buffer[ARTIST_BUFFER_CMAP].data + 0x400);
++    unsigned y = (src - fb) / s->width;
++    unsigned rows[2] = {MAX(0, (int)y - 1), y};
++    int count[3][8] = { { 0 } };
++    unsigned x, c, row;
++    int dx;
++    static const unsigned shifts[] = {5, 2, 0};
++    static const unsigned masks[] = {7, 7, 3};
++
++    /* Sliding component histograms avoid re-reading all 32 taps per pixel. */
++    for (row = 0; row < 2; row++) {
++        for (dx = -7; dx <= 8; dx++) {
++            artist_recover_accumulate(count,
++                                      fb[rows[row] * s->width + MAX(0, dx)], 1);
++        }
++    }
++    for (x = 0; x < s->width; x++) {
++        unsigned out = 0;
++        uint8_t center = src[x];
++
++        for (c = 0; c < 3; c++) {
++            int cv = (center >> shifts[c]) & masks[c];
++            int v, total = 32 * cv;
++            unsigned index, shift = 16 - c * 8;
++
++            for (v = MAX(0, cv - 1); v <= MIN(masks[c], cv + 1); v++) {
++                total += count[c][v] * (v - cv);
++            }
++            /*
++             * Recovery precedes the DAC's independent component LUTs.
++             * An RGB ramp is not an indexed 3:3:2 palette.
++             */
++            index = (total * 255 + 16 * masks[c]) / (32 * masks[c]);
++            out |= cmap[index] & (255U << shift);
++        }
++        dest[x] = out;
++        for (row = 0; row < 2; row++) {
++            artist_recover_accumulate(count,
++                fb[rows[row] * s->width + MAX(0, (int)x - 7)], -1);
++            artist_recover_accumulate(count,
++                fb[rows[row] * s->width + MIN(s->width - 1, x + 9)], 1);
++        }
++    }
++}
++
+ static void artist_draw_line(void *opaque, uint8_t *d, const uint8_t *src,
+                              int width, int pitch)
+ {
+@@ -1378,8 +1577,12 @@ static void artist_draw_line(void *opaque, uint8_t *d, const uint8_t *src,
+ 
+     cmap = (uint32_t *)(s->vram_buffer[ARTIST_BUFFER_CMAP].data + 0x400);
+ 
+-    for (x = 0; x < s->width; x++) {
+-        *data++ = cmap[*src++];
++    if (s->misc_ctrl & 1) {
++        artist_recover_line(s, data, src);
++    } else {
++        for (x = 0; x < s->width; x++) {
++            *data++ = cmap[*src++];
++        }
+     }
+ }
+ 
+@@ -1560,6 +1763,10 @@ static const Property artist_properties[] = {
+ 
+ static void artist_reset(DeviceState *qdev)
+ {
++    ARTISTState *s = ARTIST(qdev);
++
++    s->misc_ctrl &= ~3U;
++    artist_invalidate(s);
+ }
+ 
+ static void artist_class_init(ObjectClass *klass, const void *data)
+diff --git a/tests/qtest/artist-test.c b/tests/qtest/artist-test.c
+index d91922e..e563069 100644
+--- a/tests/qtest/artist-test.c
++++ b/tests/qtest/artist-test.c
+@@ -4,6 +4,7 @@
+  */
+ #include "qemu/osdep.h"
+ #include "libqtest.h"
++#include "qobject/qdict.h"
+ 
+ #define REG 0xf8000000ULL
+ #define FB  0xf9000000ULL
+@@ -131,6 +132,268 @@ static void fifo_status(void)
+     qtest_quit(q);
+ }
+ 
++static void fractional_access(void)
++{
++    QTestState *q = start();
++
++    qtest_writel(q, DBA, 0xbba00000);
++    qtest_writel(q, IBO, 0x03000340);
++    qtest_writel(q, FB, 0x008090a0);
++    qtest_writel(q, FB + 4, 0x008090a0);
++    qtest_writel(q, FB + 8192, 0x008090a0);
++    /* Independently calculated Artist matrix positions (0,0), (1,0), (0,1). */
++    g_assert_cmphex(qtest_readb(q, FB), ==, 0x72);
++    g_assert_cmphex(qtest_readb(q, FB + 1), ==, 0x92);
++    g_assert_cmphex(qtest_readb(q, FB + 2048), ==, 0x92);
++    qtest_writel(q, FB + 8, 0x00ffffff);
++    qtest_writel(q, FB + 12, 0);
++    g_assert_cmphex(qtest_readb(q, FB + 2), ==, 0xff);
++    g_assert_cmphex(qtest_readb(q, FB + 3), ==, 0);
++    qtest_writel(q, SBA, 0xbba00000);
++    g_assert_cmphex(qtest_readl(q, FB + 8), ==, 0xffffff);
++    g_assert_cmphex(qtest_readl(q, FB + 12), ==, 0);
++    g_assert_cmphex(qtest_readl(q, FB + 1280 * 4), ==, 0);
++    qtest_quit(q);
++}
++
++static void fractional_readback(void)
++{
++    QTestState *q = start();
++    unsigned i;
++
++    /* Save/restore disables dithering (IBO bit 6) in the native HP driver. */
++    for (i = 0; i < 256; i++) {
++        uint32_t rgb;
++        qtest_writel(q, DBA, 0x13600000);
++        qtest_writeb(q, FB + i, i);
++        qtest_writel(q, SBA, 0xbba00000);
++        rgb = qtest_readl(q, FB + i * 4);
++        qtest_writel(q, DBA, 0xbba00000);
++        qtest_writel(q, FB + 8192 + i * 4, rgb);
++        qtest_writel(q, SBA, 0x13600000);
++        g_assert_cmphex(qtest_readb(q, FB + 2048 + i), ==, i);
++    }
++    qtest_writel(q, DBA, 0xbba00000);
++    qtest_writel(q, FB, 0x123456);
++    qtest_writeb(q, FB + 1, 0xff); /* red only */
++    g_assert_cmphex(qtest_readb(q, FB) & 0xe0, ==, 0xe0);
++    g_assert_cmphex(qtest_readb(q, FB) & 0x1f, ==, 5);
++    qtest_writew(q, FB + 2, 0xffff); /* green and blue */
++    g_assert_cmphex(qtest_readb(q, FB), ==, 0xff);
++    qtest_writeb(q, FB, 0); /* padding is ignored */
++    g_assert_cmphex(qtest_readb(q, FB), ==, 0xff);
++    qtest_quit(q);
++}
++
++static void fractional_fill(void)
++{
++    QTestState *q = start();
++    unsigned x, y;
++
++    qtest_writel(q, DBA, 0xbba00000);
++    qtest_writel(q, IBO, 0x83000360);
++    qtest_writel(q, REG + 0x118014, 0x00ff0000);
++    qtest_writel(q, REG + 0x100800, (5 << 16) | 7);
++    qtest_writel(q, REG + 0x100a04, (20 << 16) | 2);
++    for (y = 7; y < 9; y++) {
++        for (x = 5; x < 25; x++) {
++            g_assert_cmphex(qtest_readb(q, FB + y * 2048 + x), ==, 0xe0);
++        }
++    }
++    g_assert_cmphex(qtest_readb(q, FB + 7 * 2048 + 4), ==, 0);
++    g_assert_cmphex(qtest_readb(q, FB + 9 * 2048 + 5), ==, 0);
++    qtest_quit(q);
++}
++
++static void fractional_drawing(void)
++{
++    QTestState *q = start();
++
++    qtest_writel(q, DBA, 0xbba00000);
++    qtest_writel(q, IBO, 0x03000342);
++    qtest_writel(q, REG + 0x118010, 0x8090a0);
++    qtest_writel(q, REG + 0x100800, 0);
++    qtest_writel(q, REG + 0x100e44, 1 << 16);
++    g_assert_cmphex(qtest_readb(q, FB), ==, 0x72);
++    g_assert_cmphex(qtest_readb(q, FB + 1), ==, 0x92);
++    qtest_writel(q, REG + 0x100800, (10 << 16) | 2);
++    qtest_writel(q, REG + 0x100804, (16 << 16) | 2);
++    qtest_writel(q, REG + 0x100aa0, 0xffff0000);
++    g_assert_cmphex(qtest_readb(q, FB + 2 * 2048 + 10), ==, 0x72);
++    g_assert_cmphex(qtest_readb(q, FB + 2 * 2048 + 11), ==, 0x92);
++    qtest_writel(q, IBO, 0x23000340);
++    qtest_writel(q, MASK, 0);
++    qtest_writel(q, FB + 8192, 0xffffff);
++    g_assert_cmphex(qtest_readb(q, FB + 2048), ==, 0);
++    qtest_writel(q, MASK, 0x80000000);
++    qtest_writel(q, FB + 8192, 0xffffff);
++    g_assert_cmphex(qtest_readb(q, FB + 2048), ==, 0xff);
++    qtest_quit(q);
++}
++
++static void source_trigger_blit(void)
++{
++    QTestState *q = start();
++    uint8_t original[8][128], expected[8][128], actual[128];
++    unsigned x, y;
++
++    for (y = 0; y < 8; y++) {
++        for (x = 0; x < 128; x++) {
++            original[y][x] = y * 37 + x;
++        }
++        qtest_memwrite(q, FB + y * 2048, original[y], 128);
++    }
++    memcpy(expected, original, sizeof(expected));
++    for (y = 0; y < 4; y++) {
++        memcpy(expected[y + 2] + 40, original[y] + 20, 60);
++    }
++    /* NGLE permits the blit opcode on the source, size or destination write. */
++    qtest_writel(q, REG + 0x100800, (40 << 16) | 2);
++    qtest_writel(q, REG + 0x100804, (60 << 16) | 4);
++    qtest_writel(q, REG + 0x100b08, 20 << 16);
++    for (y = 0; y < 8; y++) {
++        qtest_memread(q, FB + y * 2048, actual, 128);
++        g_assert_cmpmem(actual, 128, expected[y], 128);
++    }
++    qtest_quit(q);
++}
++
++static uint32_t screen_pixel(QTestState *q, unsigned x, unsigned y)
++{
++    g_autofree char *name = NULL;
++    unsigned width, height, max;
++    uint8_t pixel[3];
++    FILE *image;
++    int fd = g_file_open_tmp("qtest-artist-XXXXXX", &name, NULL);
++
++    g_assert_cmpint(fd, >=, 0);
++    close(fd);
++    qtest_qmp_assert_success(q, "{'execute':'screendump',"
++                            "'arguments':{'filename':%s}}", name);
++    image = fopen(name, "rb");
++    g_assert_nonnull(image);
++    g_assert_cmpint(fscanf(image, "P6 %u %u %u", &width, &height, &max), ==, 3);
++    g_assert_cmpuint(max, ==, 255);
++    g_assert_cmpuint(x, <, width);
++    g_assert_cmpuint(y, <, height);
++    g_assert_cmpint(fgetc(image), ==, '\n');
++    g_assert_cmpint(fseek(image, (y * width + x) * 3, SEEK_CUR), ==, 0);
++    g_assert_cmpuint(fread(pixel, 1, 3, image), ==, 3);
++    fclose(image);
++    unlink(name);
++    return (pixel[0] << 16) | (pixel[1] << 8) | pixel[2];
++}
++
++static void palette(QTestState *q, unsigned index, uint32_t rgb)
++{
++    qtest_writel(q, DBA, 0xbbe0f000);
++    qtest_writel(q, REG + 0x1004a0, (0x100 + index) * 4);
++    qtest_writel(q, REG + 0x100600, rgb);
++    qtest_writel(q, DBA, 0x13600000);
++}
++
++static void component_lut(QTestState *q)
++{
++    unsigned i;
++    for (i = 0; i < 256; i++) {
++        palette(q, i, i * 0x010101);
++    }
++}
++
++static void recovery_scanout(void)
++{
++    QTestState *q = start();
++    unsigned x, y;
++
++    palette(q, 0x60, 0x600000);
++    palette(q, 0x80, 0x800000);
++    palette(q, 0xe0, 0xff0000);
++    for (y = 10; y <= 12; y++) {
++        for (x = 0; x < 32; x++) {
++            qtest_writeb(q, FB + y * 2048 + x, 0x60);
++        }
++    }
++    qtest_writeb(q, FB + 11 * 2048 + 16, 0x80);
++    g_assert_cmphex(screen_pixel(q, 16, 11), ==, 0x800000);
++    component_lut(q);
++    qtest_writel(q, REG + 0x300308, 0x00800003);
++    g_assert_cmphex(screen_pixel(q, 16, 11), ==, 0x6e0000);
++    /* A changed preceding row must dirty the filtered output row too. */
++    qtest_writeb(q, FB + 10 * 2048 + 16, 0x80);
++    g_assert_cmphex(screen_pixel(q, 16, 11), ==, 0x700000);
++    /* A high-contrast isolated feature must survive edge rejection. */
++    qtest_writeb(q, FB + 11 * 2048 + 16, 0xe0);
++    g_assert_cmphex(screen_pixel(q, 16, 11), ==, 0xff0000);
++    qtest_writel(q, REG + 0x300308, 0x00800000);
++    palette(q, 0xe0, 0x112233);
++    g_assert_cmphex(screen_pixel(q, 16, 11), ==, 0x112233);
++    qtest_quit(q);
++}
++
++static void wait_migration(QTestState *q)
++{
++    int64_t deadline = g_get_monotonic_time() + 30 * G_TIME_SPAN_SECOND;
++
++    while (true) {
++        QDict *r = qtest_qmp_assert_success_ref(q,
++                                               "{'execute':'query-migrate'}");
++        const char *status = qdict_get_str(r, "status");
++        bool done = !strcmp(status, "completed");
++
++        g_assert_cmpstr(status, !=, "failed");
++        qobject_unref(r);
++        if (done) {
++            return;
++        }
++        g_assert_cmpint(g_get_monotonic_time(), <, deadline);
++        g_usleep(1000);
++    }
++}
++
++static void recovery_migration(void)
++{
++    QTestState *from = start(), *to;
++    g_autofree char *path = NULL;
++    g_autofree char *uri = NULL;
++    int fd = g_file_open_tmp("qtest-artist-migration-XXXXXX", &path, NULL);
++
++    g_assert_cmpint(fd, >=, 0);
++    close(fd);
++    uri = g_strdup_printf("file:%s", path);
++    component_lut(from);
++    qtest_writeb(from, FB + 11 * 2048 + 16, 0xe0);
++    qtest_writel(from, REG + 0x300308, 0x00800003);
++    g_assert_cmphex(screen_pixel(from, 16, 11), ==, 0xff0000);
++    qtest_qmp_assert_success(from,
++        "{'execute':'migrate','arguments':{'uri':%s}}", uri);
++    wait_migration(from);
++    to = qtest_init("-machine 715 -m 64 -nic none -incoming defer");
++    qtest_qmp_assert_success(to,
++        "{'execute':'migrate-incoming','arguments':{'uri':%s}}", uri);
++    wait_migration(to);
++    g_assert_cmphex(qtest_readb(to, FB + 11 * 2048 + 16), ==, 0xe0);
++    g_assert_cmphex(screen_pixel(to, 16, 11), ==, 0xff0000);
++    qtest_quit(to);
++    qtest_quit(from);
++    unlink(path);
++}
++
++static void recovery_reset(void)
++{
++    QTestState *q = start();
++
++    palette(q, 0x60, 0x600000);
++    palette(q, 0x80, 0x800000);
++    qtest_writeb(q, FB + 11 * 2048 + 16, 0x80);
++    qtest_writeb(q, FB + 11 * 2048 + 15, 0x60);
++    component_lut(q);
++    qtest_writel(q, REG + 0x300308, 0x00800003);
++    g_assert_cmphex(screen_pixel(q, 16, 11), ==, 0x910000);
++    qtest_qmp_assert_success(q, "{'execute':'system_reset'}");
++    g_assert_cmphex(screen_pixel(q, 16, 11), ==, 0x808080);
++    qtest_quit(q);
++}
++
+ int main(int argc, char **argv)
+ {
+     g_test_init(&argc, &argv, NULL);
+@@ -140,5 +403,13 @@ int main(int argc, char **argv)
+     qtest_add_func("/artist/direct-bounds", direct_bounds);
+     qtest_add_func("/artist/unallocated-views", unallocated_views);
+     qtest_add_func("/artist/fifo-status", fifo_status);
++    qtest_add_func("/artist/fractional-access", fractional_access);
++    qtest_add_func("/artist/fractional-readback", fractional_readback);
++    qtest_add_func("/artist/fractional-fill", fractional_fill);
++    qtest_add_func("/artist/fractional-drawing", fractional_drawing);
++    qtest_add_func("/artist/source-trigger-blit", source_trigger_blit);
++    qtest_add_func("/artist/recovery-scanout", recovery_scanout);
++    qtest_add_func("/artist/recovery-migration", recovery_migration);
++    qtest_add_func("/artist/recovery-reset", recovery_reset);
+     return g_test_run();
+ }
+diff --git a/tests/qtest/meson.build b/tests/qtest/meson.build
+index 2c1111e..009d82b 100644
+--- a/tests/qtest/meson.build
++++ b/tests/qtest/meson.build
+@@ -157,6 +157,8 @@ qtests_hppa = \
+   qtests_filter + \
+   (config_all_devices.has_key('CONFIG_VGA') ? ['display-vga-test'] : [])
+ 
++qtests_hppa += (config_all_devices.has_key('CONFIG_ARTIST') ? ['artist-test'] : [])
++
+ qtests_loongarch64 = qtests_filter + \
+   (config_all_devices.has_key('CONFIG_LOONGARCH_VIRT') ? ['numa-test'] : []) + \
+   (unpack_edk2_blobs ? ['bios-tables-test'] : []) + \

@@ -8,12 +8,12 @@
   Tags with prerelease version suffixes remain prereleases.
 - Pull requests to master build/test and upload artifacts without publishing.
 - Manual runs on master can update its prerelease. The optional extended-tests
-  input adds x86_64 SCSI coverage to Linux; downloads still contain only i386
-  and qemu-img. Manual runs on other branches do not publish.
+  input adds x86_64 SCSI coverage to Linux; downloads contain i386, SPARC and HPPA emulators
+  plus qemu-img, without the optional x86_64 test emulator. Manual runs on other branches do not publish.
 
 The publish job needs successful Linux, macOS (both matrix entries) and Windows
 jobs. It independently checks all four archives, corresponding source, commit,
-patch identities, payload hashes and shared firmware before touching a release.
+patch identities, payload hashes and shared PC, SPARC and HPPA firmware before touching a release.
 Only that job has `contents: write`. The build jobs retain read-only permissions.
 
 Asset names include the QEMU version and seven-character repository commit,

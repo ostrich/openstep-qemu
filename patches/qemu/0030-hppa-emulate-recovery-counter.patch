@@ -1,0 +1,299 @@
+Subject: [PATCH 30/30] target/hppa: implement recovery-counter stepping
+
+CR0 and PSW R were stored but did not decrement or generate a recovery trap.
+NEXTSTEP PT_STEP consequently ran through to process exit.
+
+Count non-nullified instructions, restore the count on pre-completion faults,
+and deliver recovery traps before fetching the following instruction. Keep
+normal translation-block chaining when recovery counting is disabled. Reuse
+existing migrated CPU state.
+
+diff --git a/target/hppa/cpu.c b/target/hppa/cpu.c
+index a68152f..8a84972 100644
+--- a/target/hppa/cpu.c
++++ b/target/hppa/cpu.c
+@@ -83,9 +83,12 @@ static TCGTBCPUState hppa_get_tb_cpu_state(CPUState *cs)
+     }
+ 
+     /* ??? E, T, H, L bits need to be here, when implemented.  */
++    if ((env->psw & PSW_R) && (int32_t)env->cr[CR_RC] < 0) {
++        flags |= TB_FLAG_RC_NEG;
++    }
+     flags |= env->psw_n * PSW_N;
+     flags |= env->psw_xb;
+-    flags |= env->psw & (PSW_W | PSW_C | PSW_D | PSW_P);
++    flags |= env->psw & (PSW_W | PSW_C | PSW_D | PSW_P | PSW_R);
+ 
+ #ifdef CONFIG_USER_ONLY
+     flags |= TB_FLAG_UNALIGN * !env_cpu(env)->prctl_unalign_sigbus;
+@@ -124,7 +127,11 @@ static void hppa_restore_state_to_opc(CPUState *cs,
+     if (data[1] != INT32_MIN) {
+         env->iaoq_b = env->iaoq_f + data[1];
+     }
+-    env->unwind_breg = data[2];
++    env->unwind_breg = data[2] & 31;
++    if (data[2] & HPPA_INSN_RC_COUNTED) {
++        /* The faulting instruction did not complete. Restore CR0. */
++        env->cr[CR_RC] = (uint32_t)(env->cr[CR_RC] + 1);
++    }
+     /*
+      * Since we were executing the instruction at IAOQ_F, and took some
+      * sort of action that provoked the cpu_restore_state, we can infer
+diff --git a/target/hppa/cpu.h b/target/hppa/cpu.h
+index f453444..0eb97ae 100644
+--- a/target/hppa/cpu.h
++++ b/target/hppa/cpu.h
+@@ -370,6 +370,9 @@ hwaddr hppa_abs_to_phys_pa2_w1(uint8_t phys_addr_bits, vaddr addr);
+ #define TB_FLAG_PRIV_SHIFT  8
+ #define TB_FLAG_UNALIGN     0x400
+ #define TB_FLAG_SPHASH      0x800
++#define TB_FLAG_RC_NEG      0x1000
++/* Bit in insn_start parameter 2, alongside the five-bit base register. */
++#define HPPA_INSN_RC_COUNTED 0x100
+ #define CS_BASE_DIFFPAGE    (1 << 12)
+ #define CS_BASE_DIFFSPACE   (1 << 13)
+ 
+diff --git a/target/hppa/int_helper.c b/target/hppa/int_helper.c
+index 3e87b9a..de4c53f 100644
+--- a/target/hppa/int_helper.c
++++ b/target/hppa/int_helper.c
+@@ -302,6 +302,13 @@ bool hppa_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
+         return true;
+     }
+ 
++    /* Recovery counter traps precede external interrupts, independently of I. */
++    if ((env->psw & PSW_R) && (int32_t)env->cr[CR_RC] < 0) {
++        cs->exception_index = EXCP_RC;
++        hppa_cpu_do_interrupt(cs);
++        return true;
++    }
++
+     /* If interrupts are requested and enabled, raise them.  */
+     if ((interrupt_request & CPU_INTERRUPT_HARD)
+         && (env->psw & PSW_I)
+diff --git a/target/hppa/translate.c b/target/hppa/translate.c
+index 002189d..ca23658 100644
+--- a/target/hppa/translate.c
++++ b/target/hppa/translate.c
+@@ -90,6 +90,7 @@ typedef struct DisasContext {
+     bool psw_b_next;
+     bool is_pa20;
+     bool insn_start_updated;
++    bool rc_counted;
+ 
+     MemOp mo_align;
+ } DisasContext;
+@@ -336,7 +337,8 @@ static void set_insn_breg(DisasContext *ctx, int breg)
+ {
+     assert(!ctx->insn_start_updated);
+     ctx->insn_start_updated = true;
+-    tcg_set_insn_start_param(ctx->base.insn_start, 2, breg);
++    tcg_set_insn_start_param(ctx->base.insn_start, 2,
++                             breg | (ctx->rc_counted ? HPPA_INSN_RC_COUNTED : 0));
+ }
+ 
+ static DisasCond cond_make_f(void)
+@@ -724,8 +726,18 @@ static void install_link(DisasContext *ctx, unsigned link, bool with_sr0)
+ #endif
+ }
+ 
+-static void gen_excp_1(int exception)
++static void gen_excp_1(DisasContext *ctx, int exception)
+ {
++    if (ctx->rc_counted
++        && ((exception >= EXCP_HPMC && exception <= EXCP_ASSIST_EMU)
++            || (exception >= EXCP_DMAR && exception <= EXCP_PER_INTERRUPT))) {
++        /* Explicit group 1/2/3 exceptions bypass restore_state_to_opc. */
++        TCGv_i64 rc = tcg_temp_new_i64();
++        tcg_gen_ld_i64(rc, tcg_env, offsetof(CPUHPPAState, cr[CR_RC]));
++        tcg_gen_addi_i64(rc, rc, 1);
++        tcg_gen_ext32u_i64(rc, rc);
++        tcg_gen_st_i64(rc, tcg_env, offsetof(CPUHPPAState, cr[CR_RC]));
++    }
+     gen_helper_excp(tcg_env, tcg_constant_i32(exception));
+ }
+ 
+@@ -733,7 +745,7 @@ static void gen_excp(DisasContext *ctx, int exception)
+ {
+     install_iaq_entries(ctx, &ctx->iaq_f, &ctx->iaq_b);
+     nullify_save(ctx);
+-    gen_excp_1(exception);
++    gen_excp_1(ctx, exception);
+     ctx->base.is_jmp = DISAS_NORETURN;
+ }
+ 
+@@ -791,7 +803,7 @@ static bool gen_illegal(DisasContext *ctx)
+ static bool use_goto_tb(DisasContext *ctx, const DisasIAQE *f,
+                         const DisasIAQE *b)
+ {
+-    return (!iaqe_variable(f) &&
++    return (!(ctx->tb_flags & PSW_R) && !iaqe_variable(f) &&
+             (b == NULL || !iaqe_variable(b)) &&
+             translator_use_goto_tb(&ctx->base, ctx->iaoq_first + f->disp));
+ }
+@@ -802,7 +814,8 @@ static bool use_goto_tb(DisasContext *ctx, const DisasIAQE *f,
+    executing a TB that merely branches to the next TB.  */
+ static bool use_nullify_skip(DisasContext *ctx)
+ {
+-    return (!(tb_cflags(ctx->base.tb) & CF_BP_PAGE)
++    return (!(ctx->tb_flags & PSW_R)
++            && !(tb_cflags(ctx->base.tb) & CF_BP_PAGE)
+             && !iaqe_variable(&ctx->iaq_b)
+             && (((ctx->iaoq_first + ctx->iaq_b.disp) ^ ctx->iaoq_first)
+                 & TARGET_PAGE_MASK) == 0);
+@@ -816,7 +829,11 @@ static void gen_goto_tb(DisasContext *ctx, int which,
+         tcg_gen_goto_tb(which);
+         tcg_gen_exit_tb(ctx->base.tb, which);
+     } else {
+-        tcg_gen_lookup_and_goto_ptr();
++        if (ctx->tb_flags & PSW_R) {
++            tcg_gen_exit_tb(NULL, 0);
++        } else {
++            tcg_gen_lookup_and_goto_ptr();
++        }
+     }
+ }
+ 
+@@ -2027,7 +2044,11 @@ static bool do_ibranch(DisasContext *ctx, unsigned link,
+         store_psw_xb(ctx, PSW_B);
+     }
+ 
+-    tcg_gen_lookup_and_goto_ptr();
++    if (ctx->tb_flags & PSW_R) {
++        tcg_gen_exit_tb(NULL, 0);
++    } else {
++        tcg_gen_lookup_and_goto_ptr();
++    }
+     ctx->base.is_jmp = DISAS_NORETURN;
+     return nullify_end(ctx);
+ }
+@@ -2094,12 +2115,12 @@ static void do_page_zero(DisasContext *ctx)
+ 
+     switch (ctx->base.pc_first) {
+     case 0x00: /* Null pointer call */
+-        gen_excp_1(EXCP_IMP);
++        gen_excp_1(ctx, EXCP_IMP);
+         ctx->base.is_jmp = DISAS_NORETURN;
+         break;
+ 
+     case 0xb0: /* LWS */
+-        gen_excp_1(EXCP_SYSCALL_LWS);
++        gen_excp_1(ctx, EXCP_SYSCALL_LWS);
+         ctx->base.is_jmp = DISAS_NORETURN;
+         break;
+ 
+@@ -2116,13 +2137,13 @@ static void do_page_zero(DisasContext *ctx)
+         break;
+ 
+     case 0x100: /* SYSCALL */
+-        gen_excp_1(EXCP_SYSCALL);
++        gen_excp_1(ctx, EXCP_SYSCALL);
+         ctx->base.is_jmp = DISAS_NORETURN;
+         break;
+ 
+     default:
+     do_sigill:
+-        gen_excp_1(EXCP_ILL);
++        gen_excp_1(ctx, EXCP_ILL);
+         ctx->base.is_jmp = DISAS_NORETURN;
+         break;
+     }
+@@ -2867,7 +2888,7 @@ static bool trans_or(DisasContext *ctx, arg_rrr_cf_d *a)
+             /* Tell the qemu main loop to halt until this cpu has work.  */
+             tcg_gen_st_i32(tcg_constant_i32(1), tcg_env,
+                            offsetof(CPUState, halted) - offsetof(HPPACPU, env));
+-            gen_excp_1(EXCP_HALTED);
++            gen_excp_1(ctx, EXCP_HALTED);
+             ctx->base.is_jmp = DISAS_NORETURN;
+ 
+             return nullify_end(ctx);
+@@ -4682,6 +4703,9 @@ static void hppa_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
+     /* Bound the number of instructions by those left on the page.  */
+     bound = -(ctx->base.pc_first | TARGET_PAGE_MASK) / 4;
+     ctx->base.max_insns = MIN(ctx->base.max_insns, bound);
++    if (ctx->tb_flags & PSW_R) {
++        ctx->base.max_insns = 1;
++    }
+ }
+ 
+ static void hppa_tr_tb_start(DisasContextBase *dcbase, CPUState *cs)
+@@ -4719,6 +4743,7 @@ static void hppa_tr_insn_start(DisasContextBase *dcbase, CPUState *cs)
+ 
+     tcg_gen_insn_start(iaoq_f & ~TARGET_PAGE_MASK, diff, 0);
+     ctx->insn_start_updated = false;
++    ctx->rc_counted = false;
+ }
+ 
+ static void hppa_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
+@@ -4727,6 +4752,13 @@ static void hppa_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
+     CPUHPPAState *env = cpu_env(cs);
+     DisasJumpType ret;
+ 
++    /* Check before fetching, even when the next instruction is nullified. */
++    if (ctx->tb_flags & TB_FLAG_RC_NEG) {
++        gen_excp(ctx, EXCP_RC);
++        ctx->base.pc_next += 4;
++        return;
++    }
++
+     /* Execute one insn.  */
+ #ifdef CONFIG_USER_ONLY
+     if (ctx->base.pc_next < TARGET_PAGE_SIZE) {
+@@ -4736,10 +4768,14 @@ static void hppa_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
+     } else
+ #endif
+     {
+-        /* Always fetch the insn, even if nullified, so that we check
+-           the page permissions for execute.  */
+-        uint32_t insn = translator_ldl_end(env, &ctx->base, ctx->base.pc_next,
+-                                           mo_endian(ctx));
++        /* Recovery counting must not fetch a known-nullified instruction:
++           group 3 faults are suppressed for nullified instructions. */
++        uint32_t insn = 0;
++        if (!(ctx->tb_flags & PSW_R)
++            || ctx->null_cond.c != TCG_COND_ALWAYS) {
++            insn = translator_ldl_end(env, &ctx->base, ctx->base.pc_next,
++                                      mo_endian(ctx));
++        }
+ 
+         /*
+          * Set up the IA queue for the next insn.
+@@ -4753,6 +4789,16 @@ static void hppa_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
+             ctx->null_cond.c = TCG_COND_NEVER;
+             ret = DISAS_NEXT;
+         } else {
++            if (ctx->tb_flags & PSW_R) {
++                TCGv_i64 rc = tcg_temp_new_i64();
++                tcg_gen_ld_i64(rc, tcg_env, offsetof(CPUHPPAState, cr[CR_RC]));
++                tcg_gen_subi_i64(rc, rc, 1);
++                tcg_gen_ext32u_i64(rc, rc);
++                tcg_gen_st_i64(rc, tcg_env, offsetof(CPUHPPAState, cr[CR_RC]));
++                ctx->rc_counted = true;
++                tcg_set_insn_start_param(ctx->base.insn_start, 2,
++                                         HPPA_INSN_RC_COUNTED);
++            }
+             ctx->insn = insn;
+             if (!decode(ctx, insn)) {
+                 gen_illegal(ctx);
+@@ -4838,7 +4884,11 @@ static void hppa_tr_tb_stop(DisasContextBase *dcbase, CPUState *cs)
+         }
+         /* FALLTHRU */
+     case DISAS_IAQ_N_UPDATED:
+-        tcg_gen_lookup_and_goto_ptr();
++        if (ctx->tb_flags & PSW_R) {
++            tcg_gen_exit_tb(NULL, 0);
++        } else {
++            tcg_gen_lookup_and_goto_ptr();
++        }
+         break;
+     case DISAS_EXIT:
+         tcg_gen_exit_tb(NULL, 0);
+@@ -4857,7 +4907,7 @@ static void hppa_tr_tb_stop(DisasContextBase *dcbase, CPUState *cs)
+                            offsetof(CPUHPPAState, cr[CR_IIR]));
+         }
+         install_iaq_entries(ctx, &e->iaq_f, &e->iaq_b);
+-        gen_excp_1(e->excp);
++        gen_excp_1(ctx, e->excp);
+     }
+ }
+ 

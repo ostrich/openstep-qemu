@@ -8,13 +8,9 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-def main():
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('bundle', type=Path)
-    args = p.parse_args()
-    bundle = args.bundle.resolve()
+def smoke(bundle, arch, machine, firmware):
     extension = '.exe' if os.name == 'nt' else ''
-    emulator = bundle / 'bin' / ('qemu-system-i386' + extension)
+    emulator = bundle / 'bin' / ('qemu-system-' + arch + extension)
     subprocess.run([str(emulator), '--version'], check=True)
     subprocess.run([str(bundle / 'bin' / ('qemu-img' + extension)), '--version'], check=True)
     # Hold the listening port until QEMU connects, avoiding port-allocation races.
@@ -24,9 +20,8 @@ def main():
         listener.settimeout(30)
         port = listener.getsockname()[1]
         command = [str(emulator), '-L', str(bundle / 'share/qemu'),
-                   '-bios', str(bundle / 'share/qemu/bios-256k.bin'),
-                   '-machine', 'pc,acpi=off,hpet=off,usb=off', '-accel', 'tcg',
-                   '-cpu', 'pentium', '-m', '32', '-display', 'none', '-nic', 'none',
+                   '-bios', str(bundle / 'share/qemu' / firmware),
+                   '-machine', machine, '-accel', 'tcg', '-m', '64', '-display', 'none', '-nic', 'none',
                    '-monitor', 'none', '-serial', 'none',
                    '-qmp', f'tcp:127.0.0.1:{port},server=off']
         process = subprocess.Popen(command, stdin=subprocess.DEVNULL,
@@ -63,7 +58,17 @@ def main():
             if process.poll() is None:
                 process.kill()
                 process.wait(timeout=10)
-    print('Bundle entry points and disk-free TCG firmware startup passed')
+    print(arch + ': bundled entry point and disk-free TCG firmware startup passed')
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('bundle', type=Path)
+    args = p.parse_args()
+    bundle = args.bundle.resolve()
+    for case in [('i386', 'pc,acpi=off,hpet=off,usb=off', 'bios-256k.bin'),
+                 ('sparc', 'SS-5', 'openbios-sparc32'),
+                 ('hppa', '715', 'hppa-firmware.img')]:
+        smoke(bundle, *case)
 
 if __name__ == '__main__':
     main()

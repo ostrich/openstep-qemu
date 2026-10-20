@@ -1,0 +1,206 @@
+Subject: [PATCH 22/30] qtest: cover NCR53C710 SCRIPTS and message handling
+
+Exercise transfer-control NOPs and conditional/unconditional transfers,
+interrupt status acknowledgement, both SIGP timing cases, negotiation reject
+messages and the final ACK transition through the HPPA LASI register window.
+Poison destinations report failures without unbounded interpreter loops.
+
+
+diff --git a/MAINTAINERS b/MAINTAINERS
+index 956892d..baf091f 100644
+--- a/MAINTAINERS
++++ b/MAINTAINERS
+@@ -1338,6 +1338,7 @@ F: hw/pci-host/astro.c
+ F: hw/pci-host/dino.c
+ F: hw/scsi/lasi_ncr710.*
+ F: hw/scsi/ncr53c710.*
++F: tests/qtest/ncr53c710-test.c
+ F: include/hw/input/lasips2.h
+ F: include/hw/misc/lasi.h
+ F: include/hw/net/lasi_82596.h
+diff --git a/tests/qtest/meson.build b/tests/qtest/meson.build
+index c0ab7c2..ecb8a66 100644
+--- a/tests/qtest/meson.build
++++ b/tests/qtest/meson.build
+@@ -153,6 +153,7 @@ qtests_alpha = ['boot-serial-test'] + \
+ qtests_avr = [ 'boot-serial-test' ]
+ 
+ qtests_hppa = \
++  (config_all_devices.has_key('CONFIG_NCR710_SCSI') ? ['ncr53c710-test'] : []) + \
+   qtests_filter + \
+   (config_all_devices.has_key('CONFIG_VGA') ? ['display-vga-test'] : [])
+ 
+diff --git a/tests/qtest/ncr53c710-test.c b/tests/qtest/ncr53c710-test.c
+new file mode 100644
+index 0000000..eea4f17
+--- /dev/null
++++ b/tests/qtest/ncr53c710-test.c
+@@ -0,0 +1,168 @@
++/*
++ * NCR53C710 SCRIPTS transfer-control regression tests.
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#include "qemu/osdep.h"
++#include "qemu/bswap.h"
++#include "libqtest.h"
++
++#define NCR_BASE 0xf0106100ULL
++#define SCRIPT 0x10000
++#define POISON 0x10100
++#define SUCCESS 0x12345678
++#define FAILURE 0xdeadbeef
++
++typedef struct ScriptCase {
++    const char *name;
++    uint32_t opcode;
++    uint32_t expected;
++} ScriptCase;
++
++static const ScriptCase cases[] = {
++    { "nop-jump", 0x80000000, SUCCESS },
++    { "nop-call", 0x88000000, SUCCESS },
++    { "nop-return", 0x90000000, SUCCESS },
++    { "nop-interrupt", 0x98000000, SUCCESS },
++    { "jump", 0x80080000, FAILURE },
++    { "call", 0x88080000, FAILURE },
++    { "return", 0x90080000, FAILURE },
++    { "interrupt", 0x98080000, POISON },
++    { "data-true-match", 0x800c0000, FAILURE },
++    { "data-true-mismatch", 0x800c0001, SUCCESS },
++    { "data-false-mismatch", 0x80040001, FAILURE },
++    { "data-false-match", 0x80040000, SUCCESS },
++};
++
++static void script_test(gconstpointer data)
++{
++    const ScriptCase *test = data;
++    uint32_t words[] = { cpu_to_be32(test->opcode), cpu_to_be32(POISON),
++                         cpu_to_be32(0x98080000), cpu_to_be32(SUCCESS) };
++    uint32_t poison[] = { cpu_to_be32(0x98080000), cpu_to_be32(FAILURE) };
++    QTestState *qts = qtest_init("-machine 715 -m 64 -nic none "
++                               "-drive if=scsi,file=null-co://,format=raw");
++
++    qtest_memwrite(qts, SCRIPT, words, sizeof(words));
++    qtest_memwrite(qts, POISON, poison, sizeof(poison));
++    /*
++     * Give a return instruction a valid destination, so a mistaken return
++     * interrupts with FAILURE rather than using uninitialized RAM.
++     */
++    qtest_writel(qts, NCR_BASE + 0x1c, POISON);
++    qtest_writel(qts, NCR_BASE + 0x2c, SCRIPT);
++    g_assert_cmphex(qtest_readl(qts, NCR_BASE + 0x30), ==, test->expected);
++    qtest_quit(qts);
++}
++
++static void pending_test(gconstpointer data)
++{
++    bool scsi = GPOINTER_TO_INT(data);
++    uint8_t pending = scsi ? 2 : 1;
++    uint8_t status = scsi ? 0x20 : 4;
++    unsigned status_reg = scsi ? 0x0d : 0x0c;
++    uint32_t words[] = {
++        cpu_to_be32(scsi ? 0x41080000 : 0x98080000), cpu_to_be32(SUCCESS),
++    };
++    QTestState *qts = qtest_init("-machine 715 -m 64 -nic none "
++                               "-drive if=scsi,file=null-co://,format=raw");
++
++    if (scsi) {
++        /* Enable selection timeout, then select absent SCSI target 3. */
++        qtest_writeb(qts, NCR_BASE + (3 ^ 3), status);
++    }
++    qtest_memwrite(qts, SCRIPT, words, sizeof(words));
++    qtest_writel(qts, NCR_BASE + 0x2c, SCRIPT);
++    g_assert_cmphex(qtest_readb(qts, NCR_BASE + (0x21 ^ 3)) & pending,
++                    ==, pending);
++    qtest_writeb(qts, NCR_BASE + (0x21 ^ 3), 0);
++    g_assert_cmphex(qtest_readb(qts, NCR_BASE + (0x21 ^ 3)) & pending,
++                    ==, pending);
++    if (!scsi) {
++        g_assert_cmphex(qtest_readl(qts, NCR_BASE + 0x30), ==, SUCCESS);
++    }
++    g_assert_cmphex(qtest_readb(qts, NCR_BASE + (status_reg ^ 3)) & status,
++                    ==, status);
++    g_assert_cmphex(qtest_readb(qts, NCR_BASE + (0x21 ^ 3)) & pending, ==, 0);
++    qtest_quit(qts);
++}
++
++static void signal_test(gconstpointer data)
++{
++    bool preset = GPOINTER_TO_INT(data);
++    uint32_t words[] = { cpu_to_be32(0x50000000), cpu_to_be32(POISON),
++                         cpu_to_be32(0x98080000), cpu_to_be32(SUCCESS) };
++    uint32_t target[] = { cpu_to_be32(0x98080000), cpu_to_be32(FAILURE) };
++    QTestState *qts = qtest_init("-machine 715 -m 64 -nic none "
++                               "-drive if=scsi,file=null-co://,format=raw");
++
++    qtest_memwrite(qts, SCRIPT, words, sizeof(words));
++    qtest_memwrite(qts, POISON, target, sizeof(target));
++    if (preset) {
++        qtest_writeb(qts, NCR_BASE + (0x21 ^ 3), 0x20);
++    }
++    qtest_writel(qts, NCR_BASE + 0x2c, SCRIPT);
++    if (!preset) {
++        g_assert_cmphex(qtest_readb(qts, NCR_BASE + (0x21 ^ 3)) & 1, ==, 0);
++        qtest_writeb(qts, NCR_BASE + (0x21 ^ 3), 0x20);
++    }
++    g_assert_cmphex(qtest_readl(qts, NCR_BASE + 0x30), ==, FAILURE);
++    g_assert_cmphex(qtest_readb(qts, NCR_BASE + (0x16 ^ 3)) & 0x40, ==, 0x40);
++    g_assert_cmphex(qtest_readb(qts, NCR_BASE + (0x16 ^ 3)) & 0x40, ==, 0);
++    qtest_quit(qts);
++}
++
++static void negotiation_test(gconstpointer data)
++{
++    unsigned kind = GPOINTER_TO_UINT(data);
++    const uint8_t sdtr[] = { 0x80, 1, 3, 1, 25, 8 };
++    const uint8_t reject[] = { 0x80, 7 };
++    const uint8_t wdtr[] = { 0x80, 1, 2, 3, 1 };
++    const uint8_t *out = kind == 0 ? sdtr : kind == 1 ? reject : wdtr;
++    unsigned count = kind == 0 ? sizeof(sdtr) :
++                     kind == 1 ? sizeof(reject) : sizeof(wdtr);
++    unsigned reply = kind == 1 ? 0 : 1;
++    uint32_t words[] = {
++        cpu_to_be32(0x41010000), cpu_to_be32(POISON),
++        cpu_to_be32(0x06000000 | count), cpu_to_be32(0x11000),
++        cpu_to_be32(reply ? 0x07000000 | reply : 0x80000000),
++        cpu_to_be32(0x11100),
++        cpu_to_be32(0x60000040), 0,
++        cpu_to_be32(0x98080000), cpu_to_be32(SUCCESS),
++    };
++    uint8_t result[5];
++    QTestState *qts = qtest_init("-machine 715 -m 64 -nic none "
++                               "-drive if=scsi,file=null-co://,format=raw");
++    qtest_memwrite(qts, 0x11000, out, count);
++    qtest_memwrite(qts, SCRIPT, words, sizeof(words));
++    qtest_writel(qts, NCR_BASE + 0x2c, SCRIPT);
++    g_assert_cmphex(qtest_readl(qts, NCR_BASE + 0x30), ==, SUCCESS);
++    g_assert_cmphex(qtest_readb(qts, NCR_BASE + (0x0b ^ 3)) & 7, ==, 2);
++    qtest_memread(qts, 0x11100, result, reply);
++    if (kind != 1) {
++        g_assert_cmphex(result[0], ==, 7);
++    }
++    qtest_quit(qts);
++}
++
++int main(int argc, char **argv)
++{
++    g_test_init(&argc, &argv, NULL);
++    for (size_t i = 0; i < G_N_ELEMENTS(cases); i++) {
++        g_autofree char *path = g_strdup_printf("/ncr710/%s", cases[i].name);
++        qtest_add_data_func(path, &cases[i], script_test);
++    }
++    qtest_add_data_func("/ncr710/preserve-dma-pending",
++                        GINT_TO_POINTER(0), pending_test);
++    qtest_add_data_func("/ncr710/preserve-scsi-pending",
++                        GINT_TO_POINTER(1), pending_test);
++    qtest_add_data_func("/ncr710/signal-wait", GINT_TO_POINTER(0), signal_test);
++    qtest_add_data_func("/ncr710/signal-preset",
++                        GINT_TO_POINTER(1), signal_test);
++    qtest_add_data_func("/ncr710/sdtr-reject-ack",
++                        GUINT_TO_POINTER(0), negotiation_test);
++    qtest_add_data_func("/ncr710/message-reject",
++                        GUINT_TO_POINTER(1), negotiation_test);
++    qtest_add_data_func("/ncr710/wdtr-reject-ack",
++                        GUINT_TO_POINTER(2), negotiation_test);
++    return g_test_run();
++}

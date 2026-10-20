@@ -1,4 +1,4 @@
-Subject: [PATCH 17/17] ui/console: allow CPU listeners with GL presentation
+Subject: [PATCH 17/30] ui/console: allow CPU listeners with GL presentation
 
 GTK and SDL attach a GL context even when a software adapter such as
 VMware SVGA supplies a CPU framebuffer. The unconditional context check

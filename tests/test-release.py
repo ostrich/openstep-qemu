@@ -60,10 +60,10 @@ class ReleaseTests(unittest.TestCase):
         self.artifacts = self.root / 'artifacts'
         self.artifacts.mkdir()
         self.candidate = self.root / 'candidate'
-        self.sources = {name: release.inputs(name) for name in ('qemu', 'seabios')}
+        self.sources = {name: release.inputs(name) for name in ('qemu', 'seabios', 'openbios', 'seabios-hppa')}
     def tearDown(self):
         self.tmp.cleanup()
-    def archives(self, mixed=False, x64=False):
+    def archives(self, mixed=False, x64=False, missing_hppa=False, bad_risc=False):
         for index, host in enumerate(release.HOSTS):
             root = version.archive_stem(host, COMMIT)
             system, architecture = host.rsplit('-', 1)
@@ -72,16 +72,27 @@ class ReleaseTests(unittest.TestCase):
             if mixed and index == 3:
                 identity['repository_commit'] = 'b' * 40
             build = {**identity, 'platform': system, 'architecture': architecture,
-                     'firmware': {'bios_sha256': digest(b'bios'), 'source': self.sources['seabios'],
+                     'firmware': {'rom_sha256': {n: digest(b'bios') for n in ('bios.bin', 'openbios-sparc32', 'hppa-firmware.img')},
+                                  'sources': {p: self.sources[p] for p in ('seabios', 'openbios', 'seabios-hppa')},
+                                  'risc_configurations': {'openbios': 'builtin-sparc32', 'seabios-hppa': 'BITS=32'},
                                   'config_sha256': release.sha(ROOT / 'configs/seabios.config'),
                                   'extra_version': '-openstep-' + VERSION},
-                     'qtests': {'device-test': {'passed': 1, 'exit_code': 0}}}
+                     'qtests': {'device-test': {'passed': 1, 'exit_code': 0}},
+                     'risc_qtests': {} if bad_risc else {'artist-test': {'passed': 14, 'exit_code': 0}},
+                     'sparc_pte': [{'passed': True}] if system == 'linux' else None,
+                     'hppa_recovery': {'count': {'passed': True}} if system == 'linux' else None}
             ext = '.exe' if system == 'windows' else ''
             files = {root + '/BUILD.json': json.dumps(build).encode(),
                      root + '/bin/qemu-system-i386' + ext: b'emulator',
+                     root + '/bin/qemu-system-sparc' + ext: b'sparc',
+                     root + '/bin/qemu-system-hppa' + ext: b'hppa',
                      root + '/bin/qemu-img' + ext: b'img',
+                     root + '/share/qemu/openbios-sparc32': b'bios',
+                     root + '/share/qemu/hppa-firmware.img': b'bios',
                      root + '/share/qemu/bios.bin': b'bios',
                      root + '/share/qemu/bios-256k.bin': b'bios'}
+            if missing_hppa and index == 0:
+                del files[root + '/bin/qemu-system-hppa' + ext]
             if x64 and index == 0:
                 files[root + '/bin/qemu-system-x86_64'] = b'extra'
             hashes = {name.removeprefix(root + '/'): digest(data) for name, data in files.items()}
@@ -138,6 +149,16 @@ class ReleaseTests(unittest.TestCase):
         self.archives(x64=True)
         with self.assertRaisesRegex(ValueError, 'x86_64 emulator'):
             release.prepare(self.artifacts, self.candidate, VERSION, COMMIT)
+    def test_candidate_rejects_missing_hppa(self):
+        self.archives(missing_hppa=True)
+        with self.assertRaisesRegex(ValueError, 'Missing distributed executable'):
+            release.prepare(self.artifacts, self.candidate, VERSION, COMMIT)
+        self.assertFalse(self.candidate.exists())
+    def test_candidate_requires_risc_regressions(self):
+        self.archives(bad_risc=True)
+        with self.assertRaisesRegex(ValueError, 'RISC regressions'):
+            release.prepare(self.artifacts, self.candidate, VERSION, COMMIT)
+        self.assertFalse(self.candidate.exists())
     def test_candidate_rejects_bad_sidecar(self):
         self.archives()
         next(self.artifacts.glob('*.sha256')).write_text('bad\n')

@@ -1,0 +1,18 @@
+Subject: [PATCH 1/2] build: terminate the empty hardware-type switch label
+
+Terminate the empty switch label with a null statement so older C cross
+compilers can build the firmware. No runtime behavior changes.
+
+diff --git a/src/parisc/parisc.c b/src/parisc/parisc.c
+index 3fdf95f..0f0f530 100644
+--- a/src/parisc/parisc.c
++++ b/src/parisc/parisc.c
+@@ -866,7 +866,7 @@ static int keep_add_generic_devices(void)
+         case HPHW_BA:           /* Core Bus adapter (LASI) */
+         case HPHW_IOA:          /* Runway port */
+         case HPHW_BRIDGE:       /* Elroy/Dino PCI bridge */
+-            /* nothing */
++            ; /* nothing */
+ 	}
+ 	dev++;
+     }

@@ -1,0 +1,90 @@
+Subject: [PATCH 26/30] lasi: handle stub audio ID and reset register reads
+
+LASI accepts audio ID/reset accesses but its read dispatcher omitted those
+addresses and aborted the emulator. Handle them like the other unimplemented
+peripheral registers, returning zero. This does not implement an audio device.
+
+The original NEXTSTEP HP audio probe reaches the missing reset-register case.
+The bounded qtest reproduces the host assertion on the old model and checks
+ID/reset reads before and after writes on the corrected model. The LASI ERS
+revision 1.1 audio chapter and register map identify offsets 0x4000 and 0x4004.
+
+Hardware reference:
+https://parisc.docs.kernel.org/en/latest/technical_documentation.html
+
+
+diff --git a/MAINTAINERS b/MAINTAINERS
+index d01103a..edb5f1d 100644
+--- a/MAINTAINERS
++++ b/MAINTAINERS
+@@ -1347,6 +1347,7 @@ F: include/hw/pci-host/dino.h
+ F: pc-bios/hppa-firmware.img
+ F: roms/seabios-hppa/
+ F: tests/functional/hppa/
++F: tests/qtest/lasi-test.c
+ 
+ Hexagon Machines
+ ----------------
+diff --git a/hw/misc/lasi.c b/hw/misc/lasi.c
+index f0dfd78..bc7567c 100644
+--- a/hw/misc/lasi.c
++++ b/hw/misc/lasi.c
+@@ -87,6 +87,8 @@ static MemTxResult lasi_chip_read_with_attrs(void *opaque, hwaddr addr,
+         val = s->iar;
+         break;
+ 
++    case LASI_AUDIO:
++    case LASI_AUDIO + 4:
+     case LASI_LPT:
+     case LASI_UART:
+     case LASI_LAN:
+diff --git a/tests/qtest/lasi-test.c b/tests/qtest/lasi-test.c
+new file mode 100644
+index 0000000..95c167c
+--- /dev/null
++++ b/tests/qtest/lasi-test.c
+@@ -0,0 +1,31 @@
++/*
++ * LASI device probe regression tests.
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#include "qemu/osdep.h"
++#include "libqtest.h"
++
++static void audio_probe(void)
++{
++    QTestState *qts = qtest_init("-machine 715 -m 64 -nic none");
++    const uint64_t base = 0xf0104000ULL;
++
++    /*
++     * These addresses are accepted by LASI even without an audio device.
++     * Probing the ID/reset registers must not reach a host assertion.
++     */
++    g_assert_cmphex(qtest_readl(qts, base), ==, 0);
++    g_assert_cmphex(qtest_readl(qts, base + 4), ==, 0);
++    qtest_writel(qts, base + 4, 1);
++    g_assert_cmphex(qtest_readl(qts, base + 4), ==, 0);
++    qtest_writel(qts, base + 4, 0);
++    g_assert_cmphex(qtest_readl(qts, base + 4), ==, 0);
++    qtest_quit(qts);
++}
++
++int main(int argc, char **argv)
++{
++    g_test_init(&argc, &argv, NULL);
++    qtest_add_func("/lasi/audio-probe", audio_probe);
++    return g_test_run();
++}
+
+diff --git a/tests/qtest/meson.build b/tests/qtest/meson.build
+index 009d82b..0265049 100644
+--- a/tests/qtest/meson.build
++++ b/tests/qtest/meson.build
+@@ -153,6 +153,7 @@ qtests_alpha = ['boot-serial-test'] + \
+ qtests_avr = [ 'boot-serial-test' ]
+ 
+ qtests_hppa = \
++  (config_all_devices.has_key('CONFIG_LASI') ? ['lasi-test'] : []) + \
+   (config_all_devices.has_key('CONFIG_NCR710_SCSI') ? ['ncr53c710-test'] : []) + \
+   qtests_filter + \
+   (config_all_devices.has_key('CONFIG_VGA') ? ['display-vga-test'] : [])

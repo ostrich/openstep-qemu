@@ -1,0 +1,342 @@
+Subject: [PATCH 27/30] artist: support byte accesses and shared image-plane views
+
+Artist has one emulated image-plane store. HP's X11R6.3 NGLE driver clears
+it through BINapp0I (0), then uses BINapp1I (1) in SETUP_FB. Map both views to
+the existing application RAM block, preserving its migration identity.
+
+Implement the byte-addressed 0x1360 view for byte, halfword and word accesses,
+with guest byte order, raster operations and masks. Clip off-screen columns
+and rows using the fixed 2048-byte pitch instead of wrapping into other rows.
+Ignore writes to unallocated views and bound legacy word reads and dirty
+ranges. NEXTSTEP's supported grayscale mode exercises these paths.
+
+Five qtests cover subword preservation, cross-view data, plane/pixel masks,
+XOR, edge clipping and unsupported buffer selectors. No new migration state
+or Color Recovery implementation is introduced.
+
+Reference: HP NGLE source in X11R6.3, programs/Xserver/hw/hp/ngle/nglehdw.h
+(SETUP_FB) and nglescreen.c (ngleDepth8_ClearImagePlanes):
+https://www.x.org/releases/X11R6.3/tars/xc-1.tar.gz
+
+
+diff --git a/MAINTAINERS b/MAINTAINERS
+index edb5f1d..1546063 100644
+--- a/MAINTAINERS
++++ b/MAINTAINERS
+@@ -1348,6 +1348,7 @@ F: pc-bios/hppa-firmware.img
+ F: roms/seabios-hppa/
+ F: tests/functional/hppa/
+ F: tests/qtest/lasi-test.c
++F: tests/qtest/artist-test.c
+ 
+ Hexagon Machines
+ ----------------
+diff --git a/hw/display/artist.c b/hw/display/artist.c
+index 288d466..1863dbb 100644
+--- a/hw/display/artist.c
++++ b/hw/display/artist.c
+@@ -148,6 +148,7 @@ typedef enum {
+     MISC_CTRL = 0x300308,       /* reg27 */
+     HORIZ_BACKPORCH = 0x300200, /* reg19 */
+     ACTIVE_LINES_LOW = 0x300208,/* reg20 */
++    FIFO_STATUS = 0x300000,    /* reg15: busy/status and free FIFO slots */
+     FIFO1 = 0x300008,           /* reg34 */
+     FIFO2 = 0x380008,
+ } artist_reg_t;
+@@ -197,6 +198,7 @@ static const char *artist_reg_name(uint64_t addr)
+     REG_NAME(LINE_END);
+     REG_NAME(FONT_WRITE_INCR_Y);
+     REG_NAME(FONT_WRITE_START);
++    REG_NAME(FIFO_STATUS);
+     REG_NAME(FIFO1);
+     REG_NAME(FIFO2);
+     }
+@@ -247,14 +249,24 @@ static int vram_read_bufidx(ARTISTState *s)
+     return (s->src_bm_access >> 12) & 0x0f;
+ }
+ 
++/*
++ * Artist has one image-plane store. HP's X11R6.3 NGLE driver clears it
++ * through BINapp0I (0), then SETUP_FB accesses it through BINapp1I (1).
++ * Keep the existing RAM block and migration identity for both views.
++ */
++static struct vram_buffer *artist_buffer(ARTISTState *s, unsigned int index)
++{
++    return &s->vram_buffer[index == 0 ? ARTIST_BUFFER_AP : index];
++}
++
+ static struct vram_buffer *vram_read_buffer(ARTISTState *s)
+ {
+-    return &s->vram_buffer[vram_read_bufidx(s)];
++    return artist_buffer(s, vram_read_bufidx(s));
+ }
+ 
+ static struct vram_buffer *vram_write_buffer(ARTISTState *s)
+ {
+-    return &s->vram_buffer[vram_write_bufidx(s)];
++    return artist_buffer(s, vram_write_bufidx(s));
+ }
+ 
+ static uint8_t artist_get_color(ARTISTState *s)
+@@ -765,15 +777,20 @@ static void artist_vram_write4(ARTISTState *s, struct vram_buffer *buf,
+ {
+     int i;
+     int mask = s->vram_bitmask >> 28;
++    unsigned int count;
+ 
+-    for (i = 0; i < 4; i++) {
++    if (offset >= buf->size) {
++        return;
++    }
++    count = MIN(4, buf->size - offset);
++    for (i = 0; i < count; i++) {
+         if (!(s->image_bitmap_op & 0x20000000) || (mask & 8)) {
+             artist_rop8(s, buf, offset + i, data >> 24);
+             data <<= 8;
+             mask <<= 1;
+         }
+     }
+-    memory_region_set_dirty(&buf->mr, offset, 3);
++    memory_region_set_dirty(&buf->mr, offset, count);
+ }
+ 
+ static void artist_vram_write32(ARTISTState *s, struct vram_buffer *buf,
+@@ -783,6 +800,11 @@ static void artist_vram_write32(ARTISTState *s, struct vram_buffer *buf,
+     uint32_t mask, vram_bitmask = s->vram_bitmask >> ((4 - size) * 8);
+     int i, pix_count = size * 8;
+ 
++    if (offset >= buf->size) {
++        return;
++    }
++    pix_count = MIN(pix_count, buf->size - offset);
++
+     for (i = 0; i < pix_count && offset + i < buf->size; i++) {
+         mask = 1 << (pix_count - 1 - i);
+ 
+@@ -810,6 +832,53 @@ static int get_vram_offset(ARTISTState *s, struct vram_buffer *buf,
+     return posy * width + posx;
+ }
+ 
++/* The direct byte-addressed view has a fixed 2048-byte line pitch. */
++static bool artist_direct_offset(struct vram_buffer *buf, hwaddr addr,
++                                 unsigned int *offset)
++{
++    unsigned int x = addr & 2047;
++    hwaddr y = addr >> 11;
++
++    if (x >= buf->width || y >= buf->height) {
++        return false;
++    }
++    *offset = y * buf->width + x;
++    return true;
++}
++
++static void artist_direct_write(ARTISTState *s, struct vram_buffer *buf,
++                                 hwaddr addr, uint32_t data, unsigned int size)
++{
++    unsigned int i, offset;
++
++    for (i = 0; i < size; i++) {
++        if (!artist_direct_offset(buf, addr + i, &offset)) {
++            continue;
++        }
++        if ((s->image_bitmap_op & 0x20000000) &&
++            !(s->vram_bitmask & (0x80000000U >> ((addr + i) & 3)))) {
++            continue;
++        }
++        artist_rop8(s, buf, offset, data >> ((size - i - 1) * 8));
++        memory_region_set_dirty(&buf->mr, offset, 1);
++    }
++}
++
++static uint32_t artist_direct_read(struct vram_buffer *buf, hwaddr addr,
++                                    unsigned int size)
++{
++    uint32_t value = 0;
++    unsigned int i, offset;
++
++    for (i = 0; i < size; i++) {
++        value <<= 8;
++        if (artist_direct_offset(buf, addr + i, &offset)) {
++            value |= buf->data[offset];
++        }
++    }
++    return value;
++}
++
+ static int vram_bit_write(ARTISTState *s, uint32_t pos, int posy,
+                           uint32_t data, int size)
+ {
+@@ -822,9 +891,9 @@ static int vram_bit_write(ARTISTState *s, uint32_t pos, int posy,
+         pos += 4;
+         break;
+ 
+-    case 0x1360: /* linux */
+-        artist_vram_write4(s, buf, get_vram_offset(s, buf, pos, posy), data);
+-        pos += 4;
++    case 0x1360: /* byte-addressed direct framebuffer */
++        artist_direct_write(s, buf, pos, data, size);
++        pos += size;
+         break;
+ 
+     case 0x13a0:
+@@ -880,9 +949,12 @@ static uint64_t artist_vram_read(void *opaque, hwaddr addr, unsigned size)
+         return 0;
+     }
+ 
+-    offset = get_vram_offset(s, buf, addr >> 2, 0);
++    if (s->src_bm_access >> 16 == 0x1360) {
++        return artist_direct_read(buf, addr, size);
++    }
+ 
+-    if (offset > buf->size) {
++    offset = get_vram_offset(s, buf, addr >> 2, 0);
++    if (offset > buf->size || sizeof(uint32_t) > buf->size - offset) {
+         return 0;
+     }
+ 
+@@ -1170,7 +1242,7 @@ static uint64_t artist_reg_read(void *opaque, hwaddr addr, unsigned size)
+         break;
+ 
+     case 0x100000:
+-    case 0x300000:
++    case FIFO_STATUS:
+     case 0x300004:
+     case 0x380000:
+         break;
+diff --git a/tests/qtest/artist-test.c b/tests/qtest/artist-test.c
+new file mode 100644
+index 0000000..c27e09c
+--- /dev/null
++++ b/tests/qtest/artist-test.c
+@@ -0,0 +1,130 @@
++/*
++ * Artist image-plane and status-register regression tests.
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#include "qemu/osdep.h"
++#include "libqtest.h"
++
++#define REG 0xf8000000ULL
++#define FB  0xf9000000ULL
++#define DBA (REG + 0x118004)
++#define SBA (REG + 0x118008)
++#define IBO (REG + 0x11801c)
++#define MASK (REG + 0x1005a0)
++#define PLANES (REG + 0x118018)
++
++static QTestState *start(void)
++{
++    QTestState *q = qtest_init("-machine 715 -m 64 -nic none");
++    qtest_writel(q, DBA, 0x13600000);
++    qtest_writel(q, SBA, 0x13600000);
++    qtest_writel(q, PLANES, 0xffffffff);
++    qtest_writel(q, IBO, 0x03000300);
++    qtest_writel(q, MASK, 0xffffffff);
++    return q;
++}
++
++static void direct_access(void)
++{
++    QTestState *q = start();
++
++    /* Fixed 2048-byte pitch, big-endian data, untouched neighboring pixels. */
++    qtest_writel(q, FB + 2048, 0x12345678);
++    g_assert_cmphex(qtest_readl(q, FB + 2048), ==, 0x12345678);
++    qtest_writeb(q, FB + 2049, 0xab);
++    g_assert_cmphex(qtest_readl(q, FB + 2048), ==, 0x12ab5678);
++    qtest_writew(q, FB + 2050, 0xcdef);
++    g_assert_cmphex(qtest_readl(q, FB + 2048), ==, 0x12abcdef);
++    g_assert_cmphex(qtest_readb(q, FB + 2049), ==, 0xab);
++    g_assert_cmphex(qtest_readw(q, FB + 2050), ==, 0xcdef);
++    qtest_quit(q);
++}
++
++static void image_views(void)
++{
++    QTestState *q = start();
++
++    /* HP's Artist driver clears BINapp0I and accesses BINapp1I directly. */
++    qtest_writel(q, DBA, 0x13600000);
++    qtest_writel(q, SBA, 0x13601000);
++    qtest_writel(q, FB, 0x01234567);
++    g_assert_cmphex(qtest_readl(q, FB), ==, 0x01234567);
++    qtest_writel(q, DBA, 0x13601000);
++    qtest_writel(q, SBA, 0x13600000);
++    qtest_writel(q, FB, 0x89abcdef);
++    g_assert_cmphex(qtest_readl(q, FB), ==, 0x89abcdef);
++    qtest_quit(q);
++}
++
++static void direct_masks(void)
++{
++    QTestState *q = start();
++
++    qtest_writel(q, FB, 0x12345678);
++    qtest_writel(q, PLANES, 0x0f);
++    qtest_writeb(q, FB, 0xab);
++    g_assert_cmphex(qtest_readl(q, FB), ==, 0x1b345678);
++    qtest_writel(q, PLANES, 0xff);
++    qtest_writel(q, IBO, 0x03000600); /* XOR */
++    qtest_writeb(q, FB, 0x55);
++    g_assert_cmphex(qtest_readb(q, FB), ==, 0x4e);
++
++    qtest_writel(q, IBO, 0x23000300); /* COPY, pixel mask enabled */
++    qtest_writel(q, MASK, 0x80000000);
++    qtest_writel(q, FB, 0xaabbccdd);
++    g_assert_cmphex(qtest_readl(q, FB), ==, 0xaa345678);
++    qtest_writel(q, MASK, 0x20000000);
++    qtest_writeb(q, FB + 2, 0xef);
++    g_assert_cmphex(qtest_readl(q, FB), ==, 0xaa34ef78);
++    qtest_quit(q);
++}
++
++static void direct_bounds(void)
++{
++    QTestState *q = start();
++    const uint64_t last = FB + 1023 * 2048 + 1279;
++
++    qtest_writel(q, FB, 0x12345678);
++    qtest_writeb(q, last, 0xab);
++    g_assert_cmphex(qtest_readw(q, last), ==, 0xab00);
++    qtest_writel(q, FB + 1280, 0xffffffff); /* off-screen columns */
++    qtest_writel(q, FB + 1024 * 2048, 0xffffffff); /* past final row */
++    qtest_writel(q, FB + 4 * 1024 * 1024, 0xffffffff); /* no wrap */
++    g_assert_cmphex(qtest_readl(q, FB), ==, 0x12345678);
++    g_assert_cmphex(qtest_readl(q, FB + 2048), ==, 0);
++    g_assert_cmphex(qtest_readl(q, FB + 1280), ==, 0);
++    g_assert_cmphex(qtest_readl(q, FB + 1024 * 2048), ==, 0);
++    qtest_quit(q);
++}
++
++static void unallocated_views(void)
++{
++    QTestState *q = start();
++    unsigned int i;
++
++    for (i = 3; i < 16; i++) {
++        if (i == 6 || i == 7 || i == 13 || i == 15) {
++            continue;
++        }
++        qtest_writel(q, DBA, 0x3ba00000 | (i << 12));
++        qtest_writel(q, SBA, 0x3ba00000 | (i << 12));
++        qtest_writel(q, FB, 0xffffffff);
++        g_assert_cmphex(qtest_readl(q, FB), ==, 0);
++        qtest_writel(q, DBA, 0x13600000 | (i << 12));
++        qtest_writel(q, SBA, 0x13600000 | (i << 12));
++        qtest_writeb(q, FB, 0xff);
++        g_assert_cmphex(qtest_readb(q, FB), ==, 0);
++    }
++    qtest_quit(q);
++}
++
++int main(int argc, char **argv)
++{
++    g_test_init(&argc, &argv, NULL);
++    qtest_add_func("/artist/direct-access", direct_access);
++    qtest_add_func("/artist/image-views", image_views);
++    qtest_add_func("/artist/direct-masks", direct_masks);
++    qtest_add_func("/artist/direct-bounds", direct_bounds);
++    qtest_add_func("/artist/unallocated-views", unallocated_views);
++    return g_test_run();
++}

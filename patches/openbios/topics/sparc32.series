@@ -1,0 +1,2 @@
+0001-sparc32-honor-romvec-io-mapping-hints.patch
+0002-sparc32-use-bypass-accesses-for-fw-cfg.patch

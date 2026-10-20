@@ -1,0 +1,24 @@
+Subject: [PATCH 20/30] scsi: ncr53c710: wake Wait Reselect on SIGP
+
+SIGP must branch to the Wait Reselect alternate address when written after
+SCRIPTS has parked, as well as when already set on entry to the instruction.
+Use the existing resume helper to clear the wait and restart interpretation.
+
+The NEXTSTEP 3.3 PA-RISC driver uses this path during SCSI startup. The
+NCR53C710 June 1992 data manual describes SIGP in ISTAT and its read-to-clear
+reflection in CTEST2. Regression coverage follows in patch 22.
+
+diff --git a/hw/scsi/ncr53c710.c b/hw/scsi/ncr53c710.c
+--- a/hw/scsi/ncr53c710.c
++++ b/hw/scsi/ncr53c710.c
+@@ -1527,6 +1527,10 @@
+         }
+         if (val & NCR710_ISTAT_ABRT) {
+             ncr710_script_dma_interrupt(s, NCR710_DSTAT_ABRT);
++        } else if ((val & NCR710_ISTAT_SIGP) &&
++                   s->waiting == NCR710_WAIT_RESELECT) {
++            s->dsp = s->dnad;
++            ncr710_resume_script(s);
+         }
+         break;
+     case NCR710_CTEST8:

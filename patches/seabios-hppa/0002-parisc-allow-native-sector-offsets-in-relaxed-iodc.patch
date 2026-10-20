@@ -1,0 +1,40 @@
+Subject: [PATCH 2/2] parisc: accept native sector boot offsets in relaxed IODC mode
+
+Keep the documented 2 KiB medium-offset requirement in strict IODC mode.
+In the existing relaxed mode, also accept offsets aligned to the disk's native
+logical sector. NEXTSTEP's original hard-disk loader reads ordinary filesystem
+blocks on 512-byte boundaries and otherwise receives PDC_INVALID_ARG before
+loading its kernel. Transfer lengths retain their existing 2 KiB validation.
+
+This is a compatibility extension in relaxed mode, not a claim that the IODC
+specification requires accepting such offsets. Native-sector alignment still
+prevents silently truncating a byte address to the wrong disk block.
+
+The source-level guard test exercises 24577 offsets per mode, including the
+original failing read, for 512-, 1024- and 2048-byte sectors. A native installed
+NEXTSTEP boot supplies the end-to-end regression.
+
+Specification: PA-RISC 1.1 I/O Firmware Architecture v0.96, ENTRY_IO:
+https://parisc.docs.kernel.org/en/latest/technical_documentation.html
+
+diff --git a/src/parisc/parisc.c b/src/parisc/parisc.c
+index 0f0f530..c79a133 100644
+--- a/src/parisc/parisc.c
++++ b/src/parisc/parisc.c
+@@ -1287,8 +1287,14 @@ int __VISIBLE parisc_iodc_ENTRY_IO(unsigned int *arg)
+                         return PDC_INVALID_ARG;
+                     /* reqsize must not be bigger than maxsize */
+                     // if (bytes_requested > ARG8) return PDC_INVALID_ARG;
+-                    /* medium start must be 2K aligned */
+-                    if (ARG5 & (FW_BLOCKSIZE-1))
++                    /*
++                     * Strict IODC requires 2 KiB medium alignment. In relaxed
++                     * mode, also accept native sector boundaries: historical
++                     * loaders use these to read ordinary disk files. Lengths
++                     * retain the 2 KiB requirement checked above.
++                     */
++                    if (ARG5 % (PDC_VERY_STRICT ? FW_BLOCKSIZE :
++                                disk_op.drive_fl->blksize))
+                         return PDC_INVALID_ARG;
+ #if PDC_VERY_STRICT
+                     /* If we are strict, a 715 may not be able to boot from some ODE CD-ROMS. */

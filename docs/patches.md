@@ -26,10 +26,16 @@ modify the guest booter. Enable via `etc/virtio-low-queues` only when needed.
 Existing topic development included device qtests, Linux/Windows/OPENSTEP guest
 checks and KVM/TCG runs. Those results are context, not proof that the complete
 combined set has passed every host/guest release gate. No physical SB16 oracle
-was available; PIC electrical/INTA equivalence remains limited. Both complete
-series and individual topics apply to the pinned bases.
+was available; PIC electrical/INTA equivalence remains limited. The complete
+series apply to the pinned bases; topic lists retain their global ordering.
 
 The AMD test registration is placed after `qtests_filter` so it composes with
 PIC/SB16 registrations. No emulator change was introduced by that adjustment.
 The public regression runner records actual TAP results, rather than treating
 successful compilation as hardware/guest compatibility evidence.
+
+SPARC and HPPA corrections, firmware dependencies, hardware references and
+validation scope are described in [NEXTSTEP RISC](risc.md). Release builds include all three emulator targets and matching patched firmware.
+HPPA recovery-counter emulation implements CR0 counting and traps used by
+NEXTSTEP single-stepping, with fault rollback, nullification and existing
+migration state preserved.

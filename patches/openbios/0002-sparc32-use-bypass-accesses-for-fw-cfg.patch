@@ -1,0 +1,58 @@
+Subject: [PATCH 2/2] sparc32: use bypass accesses for the QEMU configuration device
+
+Use the same physical bypass ASI already used by arch/sparc32/entry.S.
+The emulator-only configuration device at 0xd00000510 cannot be reached
+through the 31-bit physical PPN of microSPARC-II page-table entries.
+Other architectures retain their existing access paths.
+
+diff --git a/drivers/fw_cfg.c b/drivers/fw_cfg.c
+index 1cd3ec2..2ff559d 100644
+--- a/drivers/fw_cfg.c
++++ b/drivers/fw_cfg.c
+@@ -5,7 +5,35 @@
+ #define NO_QEMU_PROTOS
+ #include "arch/common/fw_cfg.h"
+ 
+-#if !defined(CONFIG_SPARC64)
++#if defined(CONFIG_SPARC32)
++/* The emulator's configuration device is outside microSPARC-II's 31-bit
++ * translated physical range. Use the same bypass ASI as entry.S. */
++#define FW_CFG_ASI (0x20 | ((CONFIG_FW_CFG_ADDR >> 32) & 0xf))
++
++static void
++fw_cfg_read_bytes(char *buf, unsigned int nbytes)
++{
++    unsigned int i, value;
++    unsigned long addr = (unsigned long)CONFIG_FW_CFG_ADDR + 2;
++
++    for (i = 0; i < nbytes; i++) {
++        asm volatile ("lduba [%1] %2, %0"
++                      : "=r" (value) : "r" (addr), "i" (FW_CFG_ASI)
++                      : "memory");
++        buf[i] = value;
++    }
++}
++
++void
++fw_cfg_read(uint16_t cmd, char *buf, unsigned int nbytes)
++{
++    unsigned long addr = (unsigned long)CONFIG_FW_CFG_ADDR;
++
++    asm volatile ("stha %0, [%1] %2" : : "r" (cmd), "r" (addr),
++                  "i" (FW_CFG_ASI) : "memory");
++    fw_cfg_read_bytes(buf, nbytes);
++}
++#elif !defined(CONFIG_SPARC64)
+ static volatile uint16_t *fw_cfg_cmd;
+ static volatile uint8_t *fw_cfg_data;
+ 
+@@ -142,8 +170,7 @@ void
+ fw_cfg_init(void)
+ {
+ #if defined(CONFIG_SPARC32)
+-    fw_cfg_cmd = (void *)ofmem_map_io(CONFIG_FW_CFG_ADDR, 2);
+-    fw_cfg_data = (uint8_t *)fw_cfg_cmd + 2;
++    /* Bypass accesses need no virtual mapping. */
+ #elif defined(CONFIG_SPARC64)
+     // Nothing for the port version
+ #elif defined(CONFIG_PPC)

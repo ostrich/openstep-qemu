@@ -23,7 +23,7 @@ def main():
     destination.relative_to(ROOT / 'dist')
     if destination.exists():
         raise FileExistsError('Preserve existing source archive')
-    for project in ('qemu', 'seabios'):
+    for project in json.loads((ROOT / 'upstream.json').read_text())['projects']:
         verify(ROOT / '.sources' / project, inputs(project),
                json.loads((ROOT / 'work' / ('source-' + project + '.json')).read_text()))
     destination.parent.mkdir(exist_ok=True)
@@ -36,7 +36,7 @@ def main():
         return member
     with destination.open('xb') as output, gzip.GzipFile(fileobj=output, mode='wb', filename='', mtime=0) as zipped:
         with tarfile.open(fileobj=zipped, mode='w', format=tarfile.PAX_FORMAT) as tar:
-            for project in ('qemu', 'seabios'):
+            for project in json.loads((ROOT / 'upstream.json').read_text())['projects']:
                 tar.add(ROOT / '.sources' / project, arcname='source/' + project, filter=clean)
                 if project == 'seabios':
                     content = (inputs(project)['version'] + '\n').encode()
@@ -45,7 +45,7 @@ def main():
                     tar.addfile(member, io.BytesIO(content))
             identity = {'schema': 1, 'distribution_version': version,
                         'repository_commit': os.environ.get('GITHUB_SHA'),
-                        'sources': {project: inputs(project) for project in ('qemu', 'seabios')}}
+                        'sources': {project: inputs(project) for project in json.loads((ROOT / 'upstream.json').read_text())['projects']}}
             content = (json.dumps(identity, indent=2) + '\n').encode()
             member = tarfile.TarInfo('source/SOURCE-BUILD.json')
             member.size = len(content); member.mode = 0o644

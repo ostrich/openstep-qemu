@@ -1,4 +1,4 @@
-Subject: [PATCH 5/17] vmware_vga: support 3840x2160 with sufficient video RAM
+Subject: [PATCH 5/30] vmware_vga: support 3840x2160 with sufficient video RAM
 
 The advertised 2368x1770 limit prevents guests from selecting larger modes,
 even when vgamem_mb provides enough framebuffer memory. Raise the limits to

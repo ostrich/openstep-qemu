@@ -1,0 +1,5 @@
+0026-lasi-handle-stub-audio-register-reads.patch
+0027-artist-support-byte-accesses-and-shared-image-views.patch
+0028-artist-report-command-space-in-packed-status.patch
+0029-artist-emulate-fractional-rgb-and-color-recovery.patch
+0030-hppa-emulate-recovery-counter.patch
