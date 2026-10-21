@@ -15,6 +15,23 @@ from risc_control import Guest
 CPUS = ('Fujitsu-MB86904', 'TI-MicroSparc-II', 'TI-SuperSparc-40')
 
 
+def finish_guest(guest, process):
+    """Reap the owned diskless probe, including an exit racing QMP quit."""
+    if process.poll() is None:
+        try:
+            guest.qmp('quit')
+        except (OSError, ValueError, RuntimeError):
+            # An expected fatal CPU trap can close QMP between poll and quit.
+            # Reaping and the report/trap assertions below decide the outcome.
+            pass
+    try:
+        process.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=3)
+        raise RuntimeError('Probe did not exit after QMP shutdown')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--qemu', type=Path, required=True)
@@ -76,14 +93,13 @@ def main():
                         pass
                     time.sleep(.03)
             finally:
-                if process.poll() is None:
-                    guest.qmp('quit')
-                process.wait(timeout=3)
+                finish_guest(guest, process)
         executed = len(values) == 3 and values[2] == 0x50415353
         expected = not bits or (not args.expect_original and
                                 cpu != 'TI-SuperSparc-40')
         passed = executed == expected
         if executed:
+            passed &= process.returncode == 0
             ppn = 0x100000 | (0x200 if level == 3 else 0)
             passed &= values[0] == 0x13579bdf and values[1] & 0xffffff00 == ppn
         else:
