@@ -289,7 +289,7 @@ new file mode 100644
 index 0000000..2cbf80b
 --- /dev/null
 +++ b/tests/qtest/esp-timing-test.c
-@@ -0,0 +1,315 @@
+@@ -0,0 +1,321 @@
 +/* Sun ESP aggregate DMA timing. SPDX-License-Identifier: GPL-2.0-or-later */
 +#include "qemu/osdep.h"
 +#include "libqtest.h"
@@ -523,7 +523,14 @@ index 0000000..2cbf80b
 +        gsize len;
 +        const char section[] = "esp/transfer-timer";
 +        g_assert_true(g_file_get_contents(path, &data, &len, NULL));
-+        char *record = memmem(data, len, section, strlen(section));
++        char *record = NULL;
++        /* Migration streams contain NULs; do not use a string search. */
++        for (gsize i = 0; i + strlen(section) <= len; i++) {
++            if (memcmp(data + i, section, strlen(section)) == 0) {
++                record = data + i;
++                break;
++            }
++        }
 +        g_assert_nonnull(record);
 +        record += strlen(section) + 4; /* subsection name, then version */
 +        g_assert_true(record + 12 <= data + len);

@@ -123,6 +123,13 @@ def bundle_libraries(binaries, destination, host):
             subprocess.run(['codesign', '--force', '--sign', '-', str(target)], check=True)
     return {name: digest(destination / name) for name in sorted(copied)}
 
+def strip_debug(binary, host):
+    # Mach-O's debug map contains absolute object paths added by the linker,
+    # outside the compiler's -ffile-prefix-map handling. Strip before signing.
+    option = '-S' if host == 'macos' else '--strip-debug'
+    subprocess.run(['strip', option, str(binary)], check=True)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--platform', choices=('linux', 'macos', 'windows'), required=True)
@@ -146,8 +153,7 @@ def main():
     for program in ('qemu-system-i386', 'qemu-system-sparc', 'qemu-system-hppa', 'qemu-img'):
         target = executable_dir / (program + extension)
         shutil.copy2(output / 'qemu' / (program + extension), target)
-        if args.platform in ('linux', 'windows'):
-            subprocess.run(['strip', '--strip-debug', str(target)], check=True)
+        strip_debug(target, args.platform)
         binaries[output / 'qemu' / (program + extension)] = target
         if args.platform == 'linux':
             wrapper = '#!/bin/sh\nset -eu\nroot=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)\nexport LD_LIBRARY_PATH="$root/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\nexec "$root/libexec/' + program + '"' + (' -L "$root/share/qemu"' if program != 'qemu-img' else '') + ' "$@"\n'
@@ -189,7 +195,7 @@ def main():
                             for name, entry in pins['projects'].items()
                             if not entry.get('optional', False)},
                 'firmware': json.loads((output / 'firmware/BUILD.json').read_text()),
-                'debug_symbols_stripped': args.platform in ('linux', 'windows'),
+                'debug_symbols_stripped': True,
                 'qtests': results,
                 'risc_qtests': json.loads((output / 'risc-tests/results.json').read_text()),
                 'hppa_recovery': json.loads((output / 'hppa-recovery-tests/results.json').read_text()) if args.platform == 'linux' else None,
