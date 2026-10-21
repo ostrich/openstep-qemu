@@ -289,7 +289,7 @@ new file mode 100644
 index 0000000..2cbf80b
 --- /dev/null
 +++ b/tests/qtest/esp-timing-test.c
-@@ -0,0 +1,321 @@
+@@ -0,0 +1,322 @@
 +/* Sun ESP aggregate DMA timing. SPDX-License-Identifier: GPL-2.0-or-later */
 +#include "qemu/osdep.h"
 +#include "libqtest.h"

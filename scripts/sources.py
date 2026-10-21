@@ -15,6 +15,20 @@ def run(*args, cwd=None, capture=False):
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
+def check_added_files(text):
+    # git apply can ignore extra '+' lines beyond a new-file hunk's count.
+    # Reject truncated additions before spending time compiling them in CI.
+    for section in text.split('diff --git ')[1:]:
+        if '\n--- /dev/null\n' not in section:
+            continue
+        match = re.search(r'@@ -0,0 \+1,(\d+) @@\n', section)
+        if match is None:
+            raise ValueError('Unsupported new-file patch hunk')
+        added = sum(line.startswith('+') for line in section[match.end():].splitlines())
+        if added != int(match[1]):
+            raise ValueError('New-file patch hunk line count mismatch')
+
+
 def inputs(project):
     pins = json.loads((ROOT / 'upstream.json').read_text())
     entry = pins['projects'][project]
@@ -31,6 +45,7 @@ def inputs(project):
             raise ValueError('Invalid patch file: ' + name)
         if not path.read_text().startswith(f'Subject: [PATCH {number}/{len(names)}] '):
             raise ValueError('Subject numbering mismatch: ' + name)
+        check_added_files(path.read_text())
         patches.append({'file': name, 'sha256': digest(path)})
     topic_names = []
     for topic in entry['topics']:

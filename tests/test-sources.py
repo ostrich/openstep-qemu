@@ -32,6 +32,13 @@ class SourceTests(unittest.TestCase):
             'url': 'https://example.invalid/source.git', 'version': 'test',
             'revision': 'a' * 40, 'patches': 'patches/qemu', 'topics': ['test']}}}))
         return base
+    def test_rejects_truncated_new_file(self):
+        text = ('diff --git a/new b/new\n--- /dev/null\n+++ b/new\n'
+                '@@ -0,0 +1,1 @@\n+first\n+last\n')
+        with self.assertRaisesRegex(ValueError, 'line count'):
+            source_tools.check_added_files(text)
+        source_tools.check_added_files(text.replace('+1,1', '+1,2'))
+
     def test_rejects_unlisted_patch(self):
         base = self.inventory()
         (base / '0002-test-b.patch').write_text('Subject: [PATCH 2/2] test: b\n')
