@@ -1,22 +1,41 @@
 # Emulator and firmware patches
 
-These patches correct device emulation and BIOS behavior used by OPENSTEP 4.2
-and its guest drivers. The build scripts apply the complete collections to the
-upstream commits pinned in [upstream.json](../upstream.json).
+The build applies all four project collections: QEMU, PC SeaBIOS, SPARC
+OpenBIOS and SeaBIOS-HPPA. Revisions are pinned in
+[upstream.json](../upstream.json). The tables group changes by guest platform;
+they are an index for review, **not an alternate application order**.
 
-| Project | Patches | Changes |
+## Intel PC: NEXTSTEP 3.3 and OPENSTEP 4.2
+
+| Project | Patch numbers | Area |
 | --- | --- | --- |
-| QEMU | 0001–0005 | PCnet networking, SB16 reset interrupts, PIC cascade handling and VMware SVGA 4K modes |
-| QEMU | 0006–0014 | ESP/AMD SCSI DMA, migration, register handling and regression tests |
-| QEMU | 0015–0016 | Virtio console disconnect handling and output completion |
-| QEMU | 0017 | VNC with GTK/SDL OpenGL presentation of software framebuffers |
-| QEMU | 0018–0022 | HPPA NCR710 SCRIPTS, SIGP and negotiation handshakes |
-| QEMU | 0023–0025 | SPARC ESP timing, TCX overlap and microSPARC-II PTE bits |
-| QEMU | 0026–0030 | LASI probes, Artist access/status and fractional RGB Color Recovery, HPPA recovery-counter stepping |
-| OpenBIOS | 0001–0002 | SPARC32 romvec mapping and physical fw_cfg access |
-| SeaBIOS-HPPA | 0001–0002 | Compiler build fix and relaxed boot-sector offsets |
+| QEMU | 0001–0005 | PCnet, SB16 reset, PIC cascade and VMware SVGA modes |
+| QEMU | 0006–0014 | ESP/AMD SCSI DMA, lifecycle, registers and migration; the ESP core is also used on SPARC |
+| QEMU | 0015–0016 | Virtio console disconnect and output completion |
 | SeaBIOS | 0001–0003 | ESP SCSI completion and LSI 53C810 discovery |
-| SeaBIOS | 0004 | Optional low-memory virtqueues for older boot loaders |
+| SeaBIOS | 0004 | Optional low-memory virtqueues for OPENSTEP virtio-blk boot |
+
+## SPARCstation 5: NEXTSTEP 3.3 and OPENSTEP 4.2
+
+| Project | Patch numbers | Area |
+| --- | --- | --- |
+| QEMU | 0023–0025 | ESP timing, TCX overlap and microSPARC-II PTE bits |
+| QEMU | 0031 | Carrier detection for attached Sun input devices |
+| OpenBIOS | 0001–0002 | SPARC32 romvec mapping and physical fw_cfg access |
+
+## HP 715: NEXTSTEP 3.3
+
+| Project | Patch numbers | Area |
+| --- | --- | --- |
+| QEMU | 0018–0022 | NCR710 SCRIPTS, SIGP and negotiation handshakes |
+| QEMU | 0026–0030 | LASI probes, Artist accesses/status/Color Recovery and CPU recovery-counter stepping |
+| SeaBIOS-HPPA | 0001–0002 | Compiler build fix and relaxed boot-sector offsets |
+
+## Shared host display
+
+| Project | Patch number | Area |
+| --- | --- | --- |
+| QEMU | 0017 | VNC alongside GTK/SDL OpenGL presentation of software framebuffers |
 
 ## Apply
 

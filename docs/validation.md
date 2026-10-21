@@ -21,7 +21,7 @@ patch inputs, mismatched firmware and changed payloads. Publication tests use a
 simulated GitHub client to exercise upload failures, superseded master commits
 and tag handling.
 
-## Platform-specific coverage
+## Host-specific coverage
 
 Windows skips nine AMD SCSI migration cases because the file migration transport
 cannot set its file handle nonblocking. Those cases run on Linux and macOS.
@@ -36,8 +36,10 @@ a Unix socket helper and are excluded on Windows. Ring-length, stopped-transmitt
 and transmit ring-wrap tests run on all platforms.
 
 These checks establish build, device regression and disk-free firmware startup
-coverage. They do not establish complete OPENSTEP guest compatibility on every
+coverage. They do not establish complete guest compatibility on every
 host or cover every GUI, audio and guest-service configuration.
+
+## Host display checks
 
 Display-console checks on Linux cover exact VNC pixels, resizing and reconnects
 at 320x240, 800x600 and 1600x1200 with GTK/Wayland, SDL and GTK/Xvfb software
@@ -46,13 +48,16 @@ Guest GL rendering retains its VNC restriction. These GUI checks are manual,
 using `tests/vnc-gl-framebuffer.py`; they are not part of headless CI and have
 not been run on Windows or macOS.
 
-## Full patchset local qualification
+## Complete patchset qualification on Linux
 
-The complete 30-patch QEMU series replays from the pinned upstream commit to
-the exact source used by the combined Linux build. All firmware collections
+The complete 31-patch QEMU series replays from the pinned upstream commit to
+the exact source used by the current SPARC/i386 validation build. The earlier
+combined Linux bundle used the first 30 patches. All firmware collections
 also replay cleanly and build from their pinned sources. The resulting Linux
 bundle passes its three shipped-entry-point firmware/QMP smoke tests. RISC
-qtests pass 51 cases: 13 ESP, four TCX, 19 NCR710, one LASI and 14 Artist. The
+qtests cover 55 cases: 13 ESP, four TCX, four ESCC, 19 NCR710, one LASI and
+14 Artist. The new ESCC cases pass locally along with the 17 existing SPARC
+cases and 58 shared x86 SCSI cases. The
 SPARC PTE matrix passes 18 expected outcomes; HP 715 recovery checks pass eight.
 The x86 runner passes 111 checks. Firmware source probes pass 11 OpenBIOS
 mapping cases and the HPPA strict and relaxed boot-offset matrices. Both RISC
@@ -61,7 +66,21 @@ dependencies. HPPA firmware debug stripping preserves every ELF load segment.
 Compiler prefix mapping removes private checkout paths from the packaged
 executables, including runtime source-location strings.
 
-The expanded macOS and Windows workflow configuration is linted and its release
-validation is tested with offline fixtures. These local checks do not claim
-that the new three-target jobs have already run on GitHub. CI retains the
-actual per-host regression records with each build.
+Local workflow linting and offline release fixtures check the expanded build
+configuration. For the outcome of a particular macOS or Windows build, use its
+GitHub Actions run and retained per-host regression records. Linux qualification
+alone does not establish guest compatibility on those hosts.
+
+
+## Installed guest coverage
+
+| Guest | Established coverage | Important limits |
+| --- | --- | --- |
+| Intel NEXTSTEP 3.3 | CD-root application, library, compiler-runtime and native/remote debugger tests | This is a test environment, not qualification of the OPENSTEP launcher, all PC devices or the additional VM drivers on NEXTSTEP 3.3. |
+| Intel OPENSTEP 4.2 | Device-specific guest checks, KVM/TCG runs and a separate VNC/OpenGL display check | Not every device, service or display combination is qualified on every host. |
+| SPARC NEXTSTEP 3.3 | Original CD installation, automatic hard-disk boot, Workspace, Terminal, kernel copy/compare, native halt and stopped-filesystem check on Linux TCG | These runs do not qualify all host platforms or other SPARC machines. |
+| SPARC OPENSTEP 4.2 | Original-media Essentials installation, hard-disk boot to Workspace, Terminal, 64 short SCSI queries, eight kernel copy/compare cycles, native halt and clean stopped-filesystem check | Requires instruction-based timing (`-icount shift=0,sleep=off`), attached-input carrier fix and TCX firmware. Other hosts and optional packages remain unqualified. |
+| HPPA NEXTSTEP 3.3 | Original CD installation, automatic hard-disk boot, Workspace, grayscale/Color Recovery graphics, debugger stepping and clean filesystem checks on Linux TCG | HPAdvancedAudio is not implemented; external networking is unqualified. Whole-system migration has shown missing input/timer progress after restore. |
+
+See the [RISC guide](risc.md) for the machine settings, graphics checks and
+hardware references behind the SPARC and HPPA results.

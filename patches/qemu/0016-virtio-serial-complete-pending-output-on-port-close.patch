@@ -1,4 +1,4 @@
-Subject: [PATCH 16/30] virtio-serial: complete pending output on port close
+Subject: [PATCH 16/31] virtio-serial: complete pending output on port close
 
 Host port close leaves its output queue live. Return a pending element
 through the used ring so the guest can reclaim its descriptor.

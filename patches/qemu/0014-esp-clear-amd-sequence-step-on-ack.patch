@@ -1,4 +1,4 @@
-Subject: [PATCH 14/30] esp: clear Am53C974 sequence step on interrupt acknowledgement
+Subject: [PATCH 14/31] esp: clear Am53C974 sequence step on interrupt acknowledgement
 
 Clear the Am53C974 sequence-step register when a pending interrupt is
 acknowledged, as specified in AMD section 5.2.3.9. Reads without a pending

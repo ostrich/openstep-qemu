@@ -1,4 +1,4 @@
-Subject: [PATCH 21/30] scsi: ncr53c710: complete negotiation message handshakes
+Subject: [PATCH 21/31] scsi: ncr53c710: complete negotiation message handshakes
 
 After consuming the final negotiation reply byte, keep MSG IN visible until
 the initiator releases ACK, then move to COMMAND. Otherwise NEXTSTEP 3.3

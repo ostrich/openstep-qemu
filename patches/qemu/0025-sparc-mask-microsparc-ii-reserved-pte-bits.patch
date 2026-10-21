@@ -1,4 +1,4 @@
-Subject: [PATCH 25/30] sparc: mask microSPARC-II reserved PTE bits
+Subject: [PATCH 25/31] sparc: mask microSPARC-II reserved PTE bits
 
 microSPARC-II implements a 31-bit translated physical address. Its User's
 Manual rev 1.1, section 5.2.3 (printed page 68), specifies PTE[31:27] as

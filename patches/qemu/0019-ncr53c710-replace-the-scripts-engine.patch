@@ -1,4 +1,4 @@
-Subject: [PATCH 19/30] hw/scsi/ncr53c710: rewrite the SCRIPTS engine
+Subject: [PATCH 19/31] hw/scsi/ncr53c710: rewrite the SCRIPTS engine
 From: Keith Monahan <keith@techtravels.org>
 Date: Wed,  1 Jul 2026 17:33:58 -0400
 

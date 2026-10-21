@@ -1,4 +1,4 @@
-Subject: [PATCH 26/30] lasi: handle stub audio ID and reset register reads
+Subject: [PATCH 26/31] lasi: handle stub audio ID and reset register reads
 
 LASI accepts audio ID/reset accesses but its read dispatcher omitted those
 addresses and aborted the emulator. Handle them like the other unimplemented

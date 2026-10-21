@@ -1,13 +1,21 @@
-# NEXTSTEP 3.3 on SPARC and HPPA
+# NEXTSTEP and OPENSTEP on SPARC and HPPA
 
-The source patchset supports NEXTSTEP 3.3 on QEMU's SPARCstation 5 and HP 715.
-Both have been installed from the original RISC CD and booted from their hard
-disks to Workspace. Every host download includes both emulators, matching
+The source patchset supports NEXTSTEP 3.3 and OPENSTEP 4.2 on QEMU's
+SPARCstation 5, and NEXTSTEP 3.3 on HP 715. All three have been installed
+from original media and booted from their hard disks to Workspace. Every host download includes both emulators, matching
 patched firmware and launchers. Start an installed disk with
 `sh launch/nextstep-hppa.sh DISK.raw` or `sh launch/nextstep-sparc.sh DISK.raw`.
 Windows has matching PowerShell scripts.
 
-## Changes
+## SPARCstation 5
+
+Use `launch/nextstep-sparc.sh` on Linux/macOS or
+`launch/nextstep-sparc.ps1` on Windows. The launcher selects `SS-5`, one CPU,
+64 MiB RAM, TCG, the bundled OpenBIOS and SCSI disk target 0. Networking is
+disabled. Attach the original installation CD read-only at SCSI target 2 when
+installing; remove it to test hard-disk boot.
+
+### Emulation and firmware fixes
 
 SPARC uses finite aggregate ESP DATA DMA timing, overlapping TCX blits and the
 microSPARC-II physical PTE width. The ESP model defaults to no timing delay;
@@ -26,6 +34,25 @@ reservations and preserves aligned map/unmap ranges. Its C fw_cfg driver uses
 the same physical bypass ASI as its early startup code. Use both firmware
 patches with the microSPARC-II correction; the original firmware's MMU mapping
 of the synthetic configuration device is outside that CPU's translated range.
+
+## HP 715
+
+Use `launch/nextstep-hppa.sh` on Linux/macOS or
+`launch/nextstep-hppa.ps1` on Windows. The launcher selects machine `715`, one
+CPU, 64 MiB RAM, TCG, the bundled SeaBIOS-HPPA and SCSI disk target 6. Attach the
+original installation CD read-only at target 2 when installing.
+
+Use the original PS/2 keyboard/mouse drivers. Graphics support includes BW:8
+grayscale and RGB:888/32 Artist Color Recovery. Ordinary RGB:256/8 is not
+supported by the original guest driver. Disable HPAdvancedAudio because QEMU
+has no matching audio implementation. Networking is disabled in the launcher
+and external networking remains unqualified. Standalone guest configuration
+avoids waits for unavailable configuration servers.
+
+Read [Shutdown](#shutdown) before closing this guest: QEMU may remain running
+after NEXTSTEP reaches its final kernel halt loop.
+
+### Emulation and firmware fixes
 
 HPPA uses the NCR710 SCRIPTS rewrite proposed by Keith Monahan, with additional
 SIGP and negotiation-handshake fixes. Its authorship and original sign-off are
@@ -54,6 +81,41 @@ single-stepping; storing the registers without generating traps was insufficient
 Native and remote debugger checks cover conditional branches, delay slots,
 calls/returns and thread stepping. The change models architectural CPU behavior
 rather than recognizing a guest debugger or patching original binaries.
+
+## OPENSTEP 4.2 on SPARC
+
+Use the same SS-5, 64 MiB and SCSI target settings as NEXTSTEP 3.3, with
+`-icount shift=0,sleep=off` added for both installation and normal use:
+
+```sh
+sh launch/nextstep-sparc.sh DISK.raw -icount shift=0,sleep=off
+```
+
+On Windows, append the same two arguments to `nextstep-sparc.ps1`. The
+multiarchitecture OPENSTEP 4.2 User CD contains SPARC boot files and a SPARC
+kernel even when an archive's filename mentions only Intel. Attach it read-only
+at SCSI target 2 for installation. Remove the medium for hard-disk boot.
+
+Ordinary host-clock TCG can deliver a SCSI completion while the original guest
+holds an internal sleep guard. Its callback tries to acquire the same guard,
+leaving the kernel spinning. Instruction-based virtual timing completed the
+base and graphical Essentials installation, repeated short SCSI commands and
+native file copy/compare checks. Arbitrary extra DMA delays were insufficient
+and are not included in the patchset. The original kernel and SCSA driver
+remain unchanged. This timing requirement is specific to the tested 4.2 setup;
+NEXTSTEP 3.3 remains qualified with ordinary TCG.
+
+A separate early console-open wait requires carrier detect on the permanently
+attached Sun mouse channel. The ESCC patch reports carrier for keyboard and
+mouse after reset, while leaving RS232 channels unchanged. Reset and migration
+qtests cover this behavior. It fixes the quiet cold-boot hang before Workspace.
+
+The bundle includes `QEMU,tcx.bin` as well as patched OpenBIOS. Without the TCX
+FCode, firmware falls back to serial and the framebuffer is blank. Packaging
+and bundle smoke checks require that file. An unconfigured standalone guest
+can also wait for a network configuration server; that is separate from either
+emulation failure. Continue offline with Control-C or configure standalone
+networking in the guest.
 
 ## Build
 
@@ -101,13 +163,8 @@ SS-5 -bios ...`, or `out/risc/seabios-hppa/hppa-firmware.img` with
 `-display none` for headless testing; `-nographic` changes the guest console and
 input hardware. Add a VNC server if an interactive display is wanted.
 
-The tested configurations use one CPU and 64 MiB RAM. SPARC uses its disk at
-SCSI target 0; HPPA uses target 6. The original installation CD is at target 2.
-Use writable raw disks and the original installer. HPPA supports BW:8 grayscale
-and RGB:888/32 color. Use its PS/2 keyboard/mouse drivers and disable
-HPAdvancedAudio because
-QEMU has no matching audio implementation. Standalone networking avoids waits
-for unavailable configuration servers. No original guest binaries are patched.
+Use writable raw disks and the original installer with the per-machine settings
+above. No original guest binaries are patched.
 
 ## Validation
 
@@ -136,6 +193,11 @@ color desktop checks use the original NEXTSTEP driver. Exact hardware DAC
 rounding, border padding and proprietary filter adjustments remain unverified.
 Whole HPPA guest file migration showed missing input/timer progress after
 restore; device-state tests do not qualify whole-system migration.
+
+The original NEXTSTEP RGB driver was also tested on a cold-booted installed
+guest. Saturated swatches and gradients rendered in color; window contents
+matched pixel for pixel after covering/uncovering and moving the window. The
+guest halted normally and passed an offline read-only filesystem check.
 
 Device tests can be repeated with `tests/run-risc-qtests.py`. CPU tests require
 a SPARC ELF assembler/linker:
@@ -179,8 +241,3 @@ halt. Do not inspect or mount a disk while QEMU still owns it.
 - [HP LASI and IODC specifications](https://parisc.docs.kernel.org/en/latest/technical_documentation.html)
 - [PA-RISC architecture references](https://parisc.docs.kernel.org/en/latest/technical_documentation.html), recovery counter and interruption ordering
 - [NeXT HP graphics modes](https://www.nextop.de/NeXTAnswers/1684.html)
-
-The original NEXTSTEP RGB driver was also tested on a cold-booted installed
-guest. Saturated swatches and gradients rendered in color; window contents
-matched pixel for pixel after covering/uncovering and moving the window. The
-guest halted normally and passed an offline read-only filesystem check.

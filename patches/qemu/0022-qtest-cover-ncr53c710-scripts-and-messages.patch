@@ -1,4 +1,4 @@
-Subject: [PATCH 22/30] qtest: cover NCR53C710 SCRIPTS and message handling
+Subject: [PATCH 22/31] qtest: cover NCR53C710 SCRIPTS and message handling
 
 Exercise transfer-control NOPs and conditional/unconditional transfers,
 interrupt status acknowledgement, both SIGP timing cases, negotiation reject

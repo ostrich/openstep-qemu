@@ -1,4 +1,4 @@
-Subject: [PATCH 27/30] artist: support byte accesses and shared image-plane views
+Subject: [PATCH 27/31] artist: support byte accesses and shared image-plane views
 
 Artist has one emulated image-plane store. HP's X11R6.3 NGLE driver clears
 it through BINapp0I (0), then uses BINapp1I (1) in SETUP_FB. Map both views to

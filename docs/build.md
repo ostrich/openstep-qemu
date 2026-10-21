@@ -4,6 +4,12 @@ Use Bash on Linux/macOS and the MSYS2 UCRT64 Bash shell on Windows. Python 3.12 
 Git, a C/C++ compiler, Ninja, pkg-config and the host libraries below are needed.
 QEMU's configure step provisions its supported Python build environment.
 
+Every normal build produces `qemu-system-i386`, `qemu-system-sparc`,
+`qemu-system-hppa` and `qemu-img` in one host archive. Linux also builds the
+three firmware images; macOS and Windows reuse those verified images.
+
+## Linux
+
 Ubuntu example:
 
 ```sh
@@ -14,7 +20,9 @@ sudo apt-get install build-essential git python3 python3-venv ninja-build \
 bash build/linux.sh
 ```
 
-macOS dependencies:
+## macOS
+
+Dependencies:
 
 ```sh
 brew install glib pixman libslirp ninja pkg-config python
@@ -27,7 +35,9 @@ and Mach-O dependency paths rewritten for the bundle; binaries are ad-hoc signed
 Intel and Apple Silicon build separately. Signing/notarization for publication
 is future work.
 
-Windows MSYS2 UCRT64 packages:
+## Windows
+
+MSYS2 UCRT64 packages:
 
 ```sh
 pacman -S --needed base-devel git bison flex \
@@ -41,11 +51,15 @@ OPENSTEP_FIRMWARE_DIR=/absolute/verified-firmware bash build/windows.sh
 A Windows user running the finished bundle does not need MSYS2. The build uses
 native MinGW DLLs; unresolved dependencies or MSYS runtime imports are rejected.
 
+## Shared firmware
+
 The Linux build produces `out/linux-x86_64/firmware/` containing `bios.bin`,
 `openbios-sparc32`, `hppa-firmware.img` and `BUILD.json`. Transfer the whole
 directory unchanged to other builders. Source/config/patch/ROM
 hashes are checked before use. The firmware is built once, not independently
 recompiled with an unrelated host toolchain.
+
+## Build inputs and output directories
 
 BUILD_JOBS sets parallelism. PYTHON selects the build interpreter. Build scripts
 require the installed tools; they do not install system packages automatically.

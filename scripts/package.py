@@ -160,6 +160,8 @@ def main():
         source = firmware / filename
         if source.is_file():
             shutil.copy2(source, stage / 'share/qemu' / filename)
+    # TCX FCode is required for the SPARCstation framebuffer and console.
+    shutil.copy2(firmware / 'QEMU,tcx.bin', stage / 'share/qemu/QEMU,tcx.bin')
     shutil.copytree(firmware / 'keymaps', stage / 'share/qemu/keymaps')
     for filename in ('bios.bin', 'bios-256k.bin'):
         shutil.copy2(output / 'firmware/bios.bin', stage / 'share/qemu' / filename)

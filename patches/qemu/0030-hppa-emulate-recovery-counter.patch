@@ -1,4 +1,4 @@
-Subject: [PATCH 30/30] target/hppa: implement recovery-counter stepping
+Subject: [PATCH 30/31] target/hppa: implement recovery-counter stepping
 
 CR0 and PSW R were stored but did not decrement or generate a recovery trap.
 NEXTSTEP PT_STEP consequently ran through to process exit.

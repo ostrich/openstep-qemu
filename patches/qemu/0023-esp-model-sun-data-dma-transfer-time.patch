@@ -1,4 +1,4 @@
-Subject: [PATCH 23/30] esp: model Sun DATA DMA time with device-owned lifecycle
+Subject: [PATCH 23/31] esp: model Sun DATA DMA time with device-owned lifecycle
 
 Instantaneous Sun ESP DMA completion exposes an interrupted lock-holder race
 in NEXTSTEP's original SCSA driver. Give Sun4m transfers aggregate 5 MB/s bus

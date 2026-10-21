@@ -1,4 +1,4 @@
-Subject: [PATCH 29/30] artist: emulate fractional RGB and Color Recovery
+Subject: [PATCH 29/31] artist: emulate fractional RGB and Color Recovery
 From 85b8027303b5ec3e5d3da31fc19a26755c978d03 Mon Sep 17 00:00:00 2001
 From: ostrich <570911+ostrich@users.noreply.github.com>
 Date: Sun, 18 Oct 2026 23:26:35 -0400

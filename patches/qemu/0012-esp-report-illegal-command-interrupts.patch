@@ -1,4 +1,4 @@
-Subject: [PATCH 12/30] esp: report illegal commands in the interrupt register
+Subject: [PATCH 12/31] esp: report illegal commands in the interrupt register
 
 Report invalid commands through INSTREG.ICMD rather than STATREG.IOE.
 For Am53C974, reject undefined command codes and clear the visible command

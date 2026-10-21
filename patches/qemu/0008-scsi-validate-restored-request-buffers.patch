@@ -1,4 +1,4 @@
-Subject: [PATCH 8/30] scsi: expose request buffer extent and post-load validation
+Subject: [PATCH 8/31] scsi: expose request buffer extent and post-load validation
 
 Allow an HBA to validate restored buffer progress after the backend
 has loaded its request. Supply buffer extents for existing backends.

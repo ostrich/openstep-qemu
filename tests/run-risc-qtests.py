@@ -20,6 +20,7 @@ def main():
     skip_file_migration = os.name == 'nt' or a.skip_file_migration
     build, out = a.build.resolve(), a.output.resolve()
     cases = [('sparc', 'esp-timing-test', 13), ('sparc', 'tcx-test', 4),
+             ('sparc', 'escc-test', 4),
              ('hppa', 'ncr53c710-test', 19), ('hppa', 'lasi-test', 1),
              ('hppa', 'artist-test', 14)]
     if a.include_x86:
@@ -45,6 +46,9 @@ def main():
             elif name == 'am53c974-dma-test':
                 command += ['-x', '/i386/am53c974/migration']
                 expected_skips = 9
+            elif name == 'escc-test':
+                command += ['-x', '/sparc/escc/sun/migration']
+                expected_skips = 1
             elif name == 'artist-test':
                 command += ['-x', '/hppa/artist/recovery-migration']
                 expected_skips = 1

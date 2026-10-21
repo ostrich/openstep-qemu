@@ -36,15 +36,17 @@ now authorizes the corresponding automatic publication behavior.
 ## Supported-release readiness
 
 Rolling prereleases are development downloads, not a declaration that every
-OPENSTEP guest scenario or supported host baseline has been validated.
+guest configuration or host baseline has been validated.
 
 Before a supported release:
 
-- Validate complete QEMU/SeaBIOS builds and affected guest paths together.
+- Validate QEMU and the matching PC, SPARC and HPPA firmware together.
 - Test portable bundles on Linux, Windows and both macOS host architectures.
-- Exercise OPENSTEP boot, input, graphics, network, audio, storage and services.
+- Exercise Intel NEXTSTEP 3.3 and OPENSTEP 4.2 separately, covering boot, input,
+  graphics, network, audio, storage and services with their respective drivers. Separately check SPARC and HPPA installation, hard-disk boot, input,
+  graphics, storage, debugging and clean shutdown; document unsupported devices.
 - Complete runtime dependency license/notices and corresponding-source audit,
-  including bundled firmware. The QEMU/SeaBIOS source archive alone does not
+  including bundled firmware. The emulator/firmware source archive alone does not
   supply source for every dynamically bundled third-party host library.
 - Select Linux glibc/OS and macOS/Windows minimum versions. Confirm that bundled
   library loading does not depend on the builder's package-manager paths.

@@ -1,63 +1,47 @@
 # OPENSTEP QEMU
 
-Patched QEMU and firmware for **OPENSTEP 4.2 Intel** and **NEXTSTEP 3.3 on
-SPARCstation 5 and HP 715**. The fixes let the original guest drivers boot and
-operate these machines, and support our VMware SVGA and virtio guest drivers.
-
-Get the guest drivers from [openstep-drivers](https://github.com/ostrich/openstep-drivers):
-seamless mouse integration, accelerated 2D graphics, virtio storage and networking,
-and host-to-guest file transfer and terminals.
-
-OPENSTEP exercises hardware behavior that many newer guests avoid. Bugs in
-QEMU's interrupt handling, network adapter and SCSI emulation, along with
-SeaBIOS's SCSI routines, can stall boot or prevent devices from working correctly. This
-build corrects those paths and adds the host support needed for higher-resolution
-video and guest-agent/terminal integration.
-
-## What changes
-
-| Device or firmware | Changes |
-| --- | --- |
-| PCnet network adapter | Correct descriptor-ring lengths and startup state so the original network driver can initialize and transfer packets correctly. |
-| Sound Blaster 16 | Remove a spurious completion interrupt during DSP reset. |
-| 8259 interrupt controller | Withdraw stale cascade requests that can leave guest disk interrupts blocked. |
-| VMware SVGA | Allow resolutions up to 3840×2160 with sufficient video RAM and check framebuffer bounds. |
-| Display console | Allow VNC alongside GTK/SDL OpenGL presentation of software framebuffers. |
-| AMD Am53C974 / ESP SCSI | Fix DMA transfers, page descriptors, register accesses, error reporting and migration state. |
-| Virtio console | Fix disconnect handling and return pending output descriptors, supporting the guest agent and interactive terminal services. |
-| SPARCstation 5 | Correct ESP transfer timing, overlapping TCX blits and microSPARC-II page-table handling, with patched OpenBIOS. |
-| HP 715 | Correct NCR710 SCSI and LASI probes, Artist Color Recovery for the original color driver, recovery-counter single-stepping, and patched SeaBIOS-HPPA boot loading. |
-| SeaBIOS | Fix ESP SCSI completion, recognize QEMU's LSI 53C810, and offer low-memory virtqueues for OPENSTEP's boot loader. |
-
-The build includes the complete maintained patch set. Firmware queue allocation
-stays unchanged unless the low-memory option is explicitly enabled.
-[Patch details](docs/patches.md) and [ordered patch series](patches/README.md)
-are available for rebuilding or reviewing individual changes.
+Patched QEMU and firmware for running **NEXTSTEP 3.3 and OPENSTEP 4.2 on Intel PCs** and
+**NEXTSTEP 3.3 / OPENSTEP 4.2 on SPARCstation 5** and
+**NEXTSTEP 3.3 on HP 715**. The patches fix emulation and
+firmware problems encountered by the original guest drivers. Intel guests can
+also use the accelerated graphics, virtio and integration drivers available in
+[openstep-drivers](https://github.com/ostrich/openstep-drivers).
 
 ## Download
 
-Get binaries from
-[Releases](https://github.com/ostrich/openstep-qemu/releases).
-Choose the archive for your **host**, not the guest:
+Get an archive from [Releases](https://github.com/ostrich/openstep-qemu/releases)
+for the computer running QEMU: Linux x86-64, Windows x86-64, macOS Apple Silicon
+or macOS Intel. Each archive contains **all three guest emulators**, `qemu-img`,
+runtime libraries, patched firmware and launch scripts. Windows downloads run
+without MSYS2.
 
-- Linux x86-64
-- Windows x86-64
-- macOS arm64 (Apple Silicon) or x86-64 (Intel)
+Versioned releases come from `v*` tags. **Latest master build** is a rolling
+prerelease updated after all four host builds succeed. Installation media and
+guest disks are not included.
 
-Versioned releases are built from `v*` tags. **Latest master build** is a rolling
-prerelease updated after a successful build of every platform.
+## Choose a guest
 
-Each host archive includes `qemu-system-i386`, `qemu-system-sparc`,
-`qemu-system-hppa`, `qemu-img`, runtime libraries, patched firmware and launch
-examples. The [RISC guide](docs/risc.md) covers machine settings and limitations.
-Windows users do not need
-MSYS2 to run the downloaded binaries. OPENSTEP installation media and guest disks
-are supplied separately. Download installable guest packages from the
-[driver releases](https://github.com/ostrich/openstep-drivers/releases/latest).
+| Guest system | Emulated machine | Program | Firmware |
+| --- | --- | --- | --- |
+| NEXTSTEP 3.3 / OPENSTEP 4.2 Intel | PC, Pentium | `qemu-system-i386` | SeaBIOS |
+| NEXTSTEP 3.3 / OPENSTEP 4.2 SPARC | Sun SPARCstation 5 | `qemu-system-sparc` | OpenBIOS |
+| NEXTSTEP 3.3 HPPA | HP 715 | `qemu-system-hppa` | SeaBIOS-HPPA |
 
-## Run an installed guest
+The launch scripts below start an **already installed raw disk**, select the
+matching bundled firmware and use one CPU with 64 MiB RAM. They default to TCG.
+Run them from the extracted archive directory. The PC's drivers, acceleration
+options and SSH forwarding do not apply to the SPARC or HPPA launchers.
 
-Extract the host archive. From its directory, launch an existing raw disk:
+### Intel PC: NEXTSTEP 3.3 and OPENSTEP 4.2
+
+Both Intel systems have been used for application and library testing. The
+launcher below is an **OPENSTEP 4.2 example**, not a NEXTSTEP 3.3 device recipe.
+The additional VM drivers linked here target OPENSTEP 4.2; do not assume they
+work with NEXTSTEP 3.3.
+
+The PC patches fix PCnet startup, SB16 reset interrupts, PIC cascade handling
+and AMD SCSI DMA. They also support higher-resolution VMware SVGA modes,
+reliable virtio console disconnects and virtio-blk boot with patched SeaBIOS.
 
 Linux or macOS:
 
@@ -71,45 +55,81 @@ Windows PowerShell:
 .\launch\openstep.ps1 -Disk C:\VMs\openstep.raw
 ```
 
-The examples use one Pentium CPU, 64 MiB RAM, EIDE storage, PCnet networking,
-Sound Blaster 16 and VMware SVGA with 32 MiB video RAM. **Install the VMWareFB
-guest driver before using that graphics configuration.** For a guest using
-VESA, edit the launcher to use standard VGA (`-vga std`) and remove the
-`vmware-svga` device.
+This example uses EIDE, PCnet, Sound Blaster 16 and VMware SVGA with 32 MiB video
+RAM. **Install the VMWareFB guest driver before using this graphics setup.**
+For a VESA guest, edit the launcher to replace `-vga none` and the
+`vmware-svga` device with `-vga std`.
 
-The launchers default to TCG. On Linux with KVM available:
+On Linux, select KVM with
+`OPENSTEP_ACCEL=kvm sh launch/openstep.sh /path/to/openstep.raw`.
+The launcher forwards host port 2223 to guest SSH port 22; install and configure
+an SSH server in the guest to use it.
+
+[Guest driver downloads](https://github.com/ostrich/openstep-drivers/releases/latest)
+provide seamless mouse integration, accelerated 2D graphics, virtio storage and
+networking, file transfer and terminal services. See the
+[bundle guide](docs/bundle.md#intel-pc-nextstep-33-and-openstep-42) for firmware selection and
+the additional option required for virtio-blk boot.
+
+### SPARC: NEXTSTEP 3.3 and OPENSTEP 4.2
+
+The SPARCstation 5 patches fix ESP SCSI transfer timing, overlapping TCX graphics
+blits, microSPARC-II page-table handling and keyboard/mouse carrier detection. Matching OpenBIOS fixes allow the
+original installer and hard-disk boot loader to work with that CPU behavior.
 
 ```sh
-OPENSTEP_ACCEL=kvm sh launch/openstep.sh /path/to/openstep.raw
+sh launch/nextstep-sparc.sh /path/to/nextstep.raw
 ```
 
-The network configuration forwards host port 2223 to guest SSH port 22; an SSH
-server must be installed in the guest. Shut down OPENSTEP cleanly before closing
-QEMU.
+Windows PowerShell:
 
-For virtio-blk boot, follow that driver's installation instructions and add:
-
-```text
--fw_cfg name=etc/virtio-low-queues,string=on
+```powershell
+.\launch\nextstep-sparc.ps1 -Disk C:\VMs\nextstep.raw
 ```
 
-Use the bundled BIOS with this option. It keeps persistent BIOS queues away
-from memory overwritten by OPENSTEP's boot loader. EIDE boot does not need it.
-See the [bundle guide](docs/bundle.md) for direct QEMU invocation and firmware
-selection.
+The launcher uses SCSI disk target 0 and disables networking. Both systems have
+been installed and tested through Workspace on Linux TCG. For OPENSTEP 4.2,
+append `-icount shift=0,sleep=off` to the launch command. This avoids a SCSI
+completion race in the original guest driver. See the
+[SPARC guide](docs/risc.md#sparcstation-5) for configuration and patch details.
 
-For NEXTSTEP RISC disks, use `launch/nextstep-sparc.sh` or
-`launch/nextstep-hppa.sh` on Linux/macOS. Windows has matching `.ps1` launchers.
-They use TCG, the bundled firmware, and a monitor in the launching terminal.
-For example:
+### NEXTSTEP 3.3 HPPA
+
+The HP 715 patches fix NCR710 SCSI operation, LASI probes and Artist graphics.
+They support the original driver's RGB:888/32 Color Recovery mode and PA-RISC
+recovery-counter traps for debugger single-stepping. Patched SeaBIOS-HPPA also
+handles the original hard-disk loader's sector offsets.
 
 ```sh
 sh launch/nextstep-hppa.sh /path/to/nextstep.raw
 ```
 
-The HPPA guest supports grayscale and RGB:888/32 Color Recovery with its
-original driver. HPPA networking and audio are not qualified. See the
-[RISC guide](docs/risc.md) for safe shutdown and installation details.
+Windows PowerShell:
+
+```powershell
+.\launch\nextstep-hppa.ps1 -Disk C:\VMs\nextstep.raw
+```
+
+The launcher uses SCSI disk target 6 and disables networking. Both grayscale and
+Color Recovery desktops have been tested on Linux TCG. Ordinary RGB:256/8 is not
+supported by the original guest driver. Disable HPAdvancedAudio in the guest;
+QEMU does not implement that hardware. HPPA networking remains unqualified.
+
+HPPA can remain in its kernel halt loop after shutdown. The launcher provides a
+monitor in the terminal; confirm shutdown before entering `quit`. See the
+[HPPA guide](docs/risc.md#hp-715) and [shutdown instructions](docs/risc.md#shutdown).
+
+## Patchset and validation
+
+Every build applies the complete maintained QEMU and firmware patchsets.
+[Patch details](docs/patches.md) separate Intel PC, SPARC, HPPA and shared display
+changes. The [patch index](patches/README.md) records their application order.
+The fixes preserve original guest binaries; optional PC firmware queue allocation
+is enabled only when requested.
+
+Builds run device regressions and disk-free startup checks for all three
+emulators. Those checks do not establish complete guest compatibility on every
+host. See [validation](docs/validation.md) for tested configurations and limits.
 
 ## Build from source
 
@@ -119,18 +139,16 @@ Install the [build dependencies](docs/build.md), then run:
 bash build/linux.sh
 ```
 
-The scripts fetch pinned upstream revisions, apply the patches, build, run
-regression tests and package the results in `dist/`. Windows builds use
-`build/windows.sh` in MSYS2; macOS builds use `build/macos.sh`. Both consume the
-shared firmware produced by the Linux build.
+The scripts fetch pinned revisions, apply patches, build, run regression tests
+and package results in `dist/`. Windows uses `build/windows.sh` in MSYS2;
+macOS uses `build/macos.sh`. Both reuse firmware produced by the Linux build.
 
-[upstream.json](upstream.json) records the emulator and all three firmware versions and commits.
-See [build instructions](docs/build.md) for firmware transfer, output directories
-and optional extended tests, and [release behavior](docs/releases.md) for CI
-and download publication.
+[upstream.json](upstream.json) records QEMU and all three firmware revisions.
+See [build instructions](docs/build.md) and [release behavior](docs/releases.md)
+for the full process.
 
 ## License
 
-Build tooling is GPL-2.0-or-later. QEMU, SeaBIOS, firmware and runtime libraries
-retain their original licenses and attribution. See [COPYING](COPYING) and the
-license files included with each download.
+Build tooling is GPL-2.0-or-later. QEMU, firmware and runtime libraries retain
+their original licenses and attribution. See [COPYING](COPYING) and the license
+files included with each download.

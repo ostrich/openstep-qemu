@@ -1,4 +1,4 @@
-Subject: [PATCH 18/30] hw/scsi/lasi_ncr710: remove dead and shadowing defines
+Subject: [PATCH 18/31] hw/scsi/lasi_ncr710: remove dead and shadowing defines
 From: Keith Monahan <keith@techtravels.org>
 Date: Wed,  1 Jul 2026 17:33:57 -0400
 

@@ -65,6 +65,10 @@ def main():
     p.add_argument('bundle', type=Path)
     args = p.parse_args()
     bundle = args.bundle.resolve()
+    # OpenBIOS can silently fall back to serial when the TCX FCode is absent.
+    # A QMP-only startup check would otherwise accept a broken desktop bundle.
+    if not (bundle / 'share/qemu/QEMU,tcx.bin').is_file():
+        raise RuntimeError('Bundle is missing SPARC TCX framebuffer firmware')
     for case in [('i386', 'pc,acpi=off,hpet=off,usb=off', 'bios-256k.bin'),
                  ('sparc', 'SS-5', 'openbios-sparc32'),
                  ('hppa', '715', 'hppa-firmware.img')]:

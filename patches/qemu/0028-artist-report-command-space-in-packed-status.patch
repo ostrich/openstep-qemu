@@ -1,4 +1,4 @@
-Subject: [PATCH 28/30] artist: report command space in the packed status register
+Subject: [PATCH 28/31] artist: report command space in the packed status register
 
 The original NEXTSTEP palette loader polls the low byte of Artist's packed
 status register for more than two free entries. Returning zero forever stalls

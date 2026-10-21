@@ -1,4 +1,4 @@
-Subject: [PATCH 20/30] scsi: ncr53c710: wake Wait Reselect on SIGP
+Subject: [PATCH 20/31] scsi: ncr53c710: wake Wait Reselect on SIGP
 
 SIGP must branch to the Wait Reselect alternate address when written after
 SCRIPTS has parked, as well as when already set on entry to the instruction.

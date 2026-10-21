@@ -1,4 +1,4 @@
-Subject: [PATCH 13/30] esp: report DMA direction errors and FIFO overflow
+Subject: [PATCH 13/31] esp: report DMA direction errors and FIFO overflow
 
 Set the status IOE/gross-error flag on a PCI DMA direction mismatch or
 SCSI FIFO overflow. Preserve data/counters on a direction mismatch and

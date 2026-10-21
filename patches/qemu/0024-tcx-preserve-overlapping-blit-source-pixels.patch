@@ -1,4 +1,4 @@
-Subject: [PATCH 24/30] tcx: preserve overlapping blit source pixels
+Subject: [PATCH 24/31] tcx: preserve overlapping blit source pixels
 
 Both TCX blit spaces can copy overlapping regions of their own backing
 store. memcpy gives undefined results, visible as damaged horizontal window
