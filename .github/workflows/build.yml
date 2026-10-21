@@ -63,6 +63,7 @@ jobs:
       - name: Check inputs and source tooling
         run: |
           python3 scripts/sources.py check
+          python3 tests/test-qmp.py
           python3 tests/test-sources.py
           python3 tests/test-ci-scope.py
           python3 tests/test-release.py

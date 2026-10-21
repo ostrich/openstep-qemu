@@ -15,7 +15,18 @@ class Guest:
         # A directory descriptor avoids global chdir and works across threads.
         fd = os.open(self.directory, os.O_RDONLY | os.O_DIRECTORY)
         try:
-            sock.connect('/proc/self/fd/' + str(fd) + '/' + name)
+            path = '/proc/self/fd/' + str(fd) + '/' + name
+            deadline = time.monotonic() + (sock.gettimeout() or 5)
+            while True:
+                try:
+                    sock.connect(path)
+                    break
+                except BlockingIOError:
+                    # A full Unix listen backlog reports EAGAIN immediately,
+                    # even on a socket with a timeout. Let QEMU accept first.
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(.01)
         finally:
             os.close(fd)
 
@@ -23,22 +34,22 @@ class Guest:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
             sock.settimeout(timeout)
             self._connect(sock, 'qmp.sock')
-            stream = sock.makefile('rwb')
-            json.loads(stream.readline())
-            def execute(name, args=None):
-                request = {'execute': name}
-                if args is not None:
-                    request['arguments'] = args
-                stream.write(json.dumps(request).encode() + b'\n')
-                stream.flush()
-                while True:
-                    row = json.loads(stream.readline())
-                    if 'error' in row:
-                        raise RuntimeError(row['error'])
-                    if 'return' in row:
-                        return row['return']
-            execute('qmp_capabilities')
-            return execute(command, arguments)
+            with sock.makefile('rwb') as stream:
+                json.loads(stream.readline())
+                def execute(name, args=None):
+                    request = {'execute': name}
+                    if args is not None:
+                        request['arguments'] = args
+                    stream.write(json.dumps(request).encode() + b'\n')
+                    stream.flush()
+                    while True:
+                        row = json.loads(stream.readline())
+                        if 'error' in row:
+                            raise RuntimeError(row['error'])
+                        if 'return' in row:
+                            return row['return']
+                execute('qmp_capabilities')
+                return execute(command, arguments)
 
     def key(self, key):
         self.qmp('human-monitor-command', {'command-line': 'sendkey ' + key + ' 50'})
