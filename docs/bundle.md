@@ -137,3 +137,11 @@ Shut down every guest cleanly before closing QEMU. Never mount or modify a disk
 while a VM has it open. Use `bin/qemu-img` for image operations on stopped disks.
 `BUILD.json` identifies source revisions, patches, firmware and build options.
 Include it and your QEMU command when reporting a problem.
+
+## Linux display libraries
+
+Linux bundles include SDL and the application libraries. Wayland, GBM, DRM
+and OpenGL/Vulkan libraries come from the host so they match its Mesa or
+vendor drivers and compositor plugins. A normal desktop installation provides
+these libraries. Do not copy another distribution's graphics stack into the
+bundle: an older Wayland library can prevent a newer Mesa EGL driver loading.

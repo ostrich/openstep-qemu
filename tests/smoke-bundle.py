@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-def smoke(bundle, arch, machine, firmware):
+def smoke(bundle, arch, machine, firmware, display='none'):
     extension = '.exe' if os.name == 'nt' else ''
     emulator = bundle / 'bin' / ('qemu-system-' + arch + extension)
     subprocess.run([str(emulator), '--version'], check=True)
@@ -21,7 +21,7 @@ def smoke(bundle, arch, machine, firmware):
         port = listener.getsockname()[1]
         command = [str(emulator), '-L', str(bundle / 'share/qemu'),
                    '-bios', str(bundle / 'share/qemu' / firmware),
-                   '-machine', machine, '-accel', 'tcg', '-m', '64', '-display', 'none', '-nic', 'none',
+                   '-machine', machine, '-accel', 'tcg', '-m', '64', '-display', display, '-nic', 'none',
                    '-monitor', 'none', '-serial', 'none',
                    '-qmp', f'tcp:127.0.0.1:{port},server=off']
         process = subprocess.Popen(command, stdin=subprocess.DEVNULL,
@@ -63,6 +63,8 @@ def smoke(bundle, arch, machine, firmware):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('bundle', type=Path)
+    p.add_argument('--display', choices=('none', 'sdl'), default='none',
+                   help='Use SDL to exercise actual window creation on a desktop or Xvfb')
     args = p.parse_args()
     bundle = args.bundle.resolve()
     # OpenBIOS can silently fall back to serial when the TCX FCode is absent.
@@ -72,7 +74,7 @@ def main():
     for case in [('i386', 'pc,acpi=off,hpet=off,usb=off', 'bios-256k.bin'),
                  ('sparc', 'SS-5', 'openbios-sparc32'),
                  ('hppa', '715', 'hppa-firmware.img')]:
-        smoke(bundle, *case)
+        smoke(bundle, *case, display=args.display)
 
 if __name__ == '__main__':
     main()

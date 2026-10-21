@@ -57,7 +57,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential ccache git python3 python3-venv ninja-build pkg-config bison flex acpica-tools libglib2.0-dev libpixman-1-dev libsdl2-dev libslirp-dev libfdt-dev zlib1g-dev libzstd-dev libpng-dev libjpeg-dev gcc-hppa-linux-gnu gcc-sparc64-linux-gnu xsltproc fcode-utils python-is-python3
+          sudo apt-get install -y build-essential ccache git python3 python3-venv ninja-build pkg-config bison flex acpica-tools libglib2.0-dev libpixman-1-dev libsdl2-dev libslirp-dev libfdt-dev zlib1g-dev libzstd-dev libpng-dev libjpeg-dev gcc-hppa-linux-gnu gcc-sparc64-linux-gnu xsltproc fcode-utils python-is-python3 xvfb xauth
       - name: Build identity
         run: python3 scripts/version.py --github-env
       - name: Check inputs and source tooling
@@ -76,6 +76,8 @@ jobs:
         run: bash build/linux.sh
       - name: Smoke-test packaged bundle
         run: python3 tests/smoke-bundle.py out/linux-x86_64/openstep-qemu-*-linux-x86_64
+      - name: Smoke-test SDL windows
+        run: xvfb-run -a env SDL_VIDEODRIVER=x11 python3 tests/smoke-bundle.py out/linux-x86_64/openstep-qemu-*-linux-x86_64 --display sdl
       - name: Retain unstripped executables for debugging
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:

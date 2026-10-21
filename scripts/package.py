@@ -15,6 +15,12 @@ from sources import ROOT, inputs, digest
 from version import current_version, archive_stem
 
 LINUX_SYSTEM = re.compile(r'^(?:ld-linux.*|lib(?:c|m|pthread|dl|rt|resolv|util|nss_[^.]+)\.so(?:\..*)?)$')
+# Mesa and compositor plugins load against the host's graphics stack. Older
+# bundled Wayland/GBM/DRM libraries can hide symbols required by those plugins.
+LINUX_HOST_GRAPHICS = re.compile(
+    r'^lib(?:wayland-(?:client|cursor|egl|server)|gbm|drm(?:_.*)?|'
+    r'EGL(?:_.*)?|GL(?:X(?:_.*)?|dispatch)?|GLESv[12]|OpenGL|'
+    r'vulkan(?:_.*)?)\.so(?:\..*)?$')
 
 def rpaths(binary):
     lines = subprocess.check_output(['otool', '-l', str(binary)], text=True).splitlines()
@@ -38,7 +44,8 @@ def dependencies(binary, host, executable_dir=None):
             match = re.search(r'=>\s+(/\S+)', line) or re.match(r'\s*(/\S+)\s+\(', line)
             if match:
                 path = Path(match.group(1))
-                if not LINUX_SYSTEM.fullmatch(path.name):
+                if not (LINUX_SYSTEM.fullmatch(path.name) or
+                        LINUX_HOST_GRAPHICS.fullmatch(path.name)):
                     result.append(path)
         return result
     if host == 'macos':
